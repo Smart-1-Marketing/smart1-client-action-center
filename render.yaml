@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: smart1-client-action-center
+    runtime: python
+    region: ohio
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: SECRET_KEY
+        generateValue: true
+      - key: APP_PASSWORD
+        sync: false
+    disk:
+      name: smart1-action-data
+      mountPath: /var/data
+      sizeGB: 1
