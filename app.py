@@ -2563,24 +2563,29 @@ def gmail_connect():
         )
 
     try:
+        # Use PKCE explicitly. google-auth-oauthlib generates a one-time
+        # code_verifier when authorization_url() is called. Because the OAuth
+        # callback is handled by a NEW Flow object on a later HTTP request, the
+        # verifier must be preserved and restored for the token exchange.
         flow = Flow.from_client_config(
             oauth_client_config(),
             scopes=GOOGLE_SCOPES,
             redirect_uri=redirect_uri(),
+            autogenerate_code_verifier=True,
         )
 
         # IMPORTANT:
         # This application may share a Google project/client with other Smart 1
         # utilities that have previously requested Ads, Analytics, GTM, etc.
-        # Asking Google to automatically include those previously granted scopes
-        # can cause the token response to contain scopes this application did not
-        # request. Keep this OAuth grant isolated to the Gmail + Chat scopes.
+        # Keep this OAuth grant isolated to the Gmail + Chat scopes.
         authorization_url, state = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="false",
             prompt="consent",
         )
+
         session["google_oauth_state"] = state
+        session["google_oauth_code_verifier"] = flow.code_verifier
         session.modified = True
         return redirect(authorization_url)
     except Exception as exc:
@@ -2598,10 +2603,14 @@ def gmail_callback():
         description = request.args.get("error_description", "")
         detail = f"{google_error}: {description}".strip(": ")
         set_setting("gmail_last_error", f"Google authorization denied: {detail}")
+        session.pop("google_oauth_state", None)
+        session.pop("google_oauth_code_verifier", None)
+        session.modified = True
         return google_oauth_error_page("Google Authorization Was Not Completed", detail, 400)
 
     expected_state = session.get("google_oauth_state")
     returned_state = request.args.get("state")
+    code_verifier = session.get("google_oauth_code_verifier")
 
     if not expected_state:
         detail = (
@@ -2620,12 +2629,25 @@ def gmail_callback():
         set_setting("gmail_last_error", detail)
         return google_oauth_error_page("Google OAuth State Mismatch", detail, 400)
 
+    if not code_verifier:
+        detail = (
+            "The PKCE code verifier was not present in the browser session when Google "
+            "returned to the app. Start the Google connection again from the Action Center "
+            "in the same browser session."
+        )
+        set_setting("gmail_last_error", detail)
+        return google_oauth_error_page("Google OAuth PKCE Session Lost", detail, 400)
+
     try:
+        # Restore the exact PKCE verifier that was used to create the
+        # code_challenge in /gmail/connect.
         flow = Flow.from_client_config(
             oauth_client_config(),
             scopes=GOOGLE_SCOPES,
             state=expected_state,
             redirect_uri=redirect_uri(),
+            code_verifier=code_verifier,
+            autogenerate_code_verifier=False,
         )
         flow.fetch_token(authorization_response=request.url)
 
@@ -2644,6 +2666,8 @@ def gmail_callback():
         save_credentials(creds)
         set_setting("gmail_last_error", "")
         session.pop("google_oauth_state", None)
+        session.pop("google_oauth_code_verifier", None)
+        session.modified = True
         return redirect(url_for("index"))
 
     except Exception as exc:
