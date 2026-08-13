@@ -1,12 +1,206 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart 1 Client Action Center</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
-<body><main class="page">
-<header class="topbar"><div><h1>Smart 1 Client Action Center</h1><p>Client follow-ups, items that need paid, deadlines, notes, email actions and completion history.</p></div><a class="button secondary" href="/logout">Sign out</a></header>
-<section class="metrics"><div class="metric"><span>Open Tasks</span><strong id="countOpen">0</strong></div><div class="metric"><span>Client Items</span><strong id="countClient">0</strong></div><div class="metric"><span>Need Paid</span><strong id="countPayment">0</strong></div><div class="metric"><span>Completed</span><strong id="countCompleted">0</strong></div></section>
-<section class="filters"><label>Search<input id="search" type="search" placeholder="Search client, vendor or task"></label><label>Category<select id="category"><option value="all">All Open Items</option><option value="client">Client Items</option><option value="payment">Needs Paid</option><option value="history">Completed History</option></select></label><label>Status<select id="status"><option value="all">All Statuses</option><option>Open</option><option>Working</option><option>Waiting</option><option>Blocked</option></select></label></section>
-<div class="toolbar"><span>Sorted by due date. Tasks without deadlines appear last.</span><button id="addTaskBtn" class="button secondary">+ Add Task</button></div>
-<section id="newTaskPanel" class="panel hidden"><h2>Add Task</h2><div class="formgrid"><label>Client / Vendor<input id="newParty"></label><label>Category<select id="newCategory"><option value="client">Client Item</option><option value="payment">Needs Paid</option></select></label><label class="span2">What needs done?<input id="newTitle"></label><label>Priority<select id="newPriority"><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label><label>Deadline<input id="newDue" type="date"></label><label class="span2">Detail<textarea id="newDetail" rows="2"></textarea></label></div><div class="row"><button id="saveNewTask" class="button primary">Save Task</button><button id="cancelNewTask" class="button secondary">Cancel</button></div></section>
-<section id="taskList" class="task-list"></section>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Smart 1 Client Action Center</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="page">
+  <header class="topbar">
+    <div>
+      <h1>Smart 1 Client Action Center</h1>
+      <p>AI-assisted Gmail, Sent mail, Google Chat, meeting recaps, client actions, payments and follow-up monitoring.</p>
+    </div>
+    <div class="header-actions">
+      <button id="gmailTalkBtn" class="button primary">Ask Gmail for Tasks</button>
+      <button id="watchDomainsBtn" class="button secondary">Watch Domains</button>
+      <button id="themeToggle" class="button secondary" aria-label="Toggle dark mode">Dark Mode</button>
+      <a class="button secondary" href="/logout">Sign out</a>
+    </div>
+  </header>
+
+  <section class="system-bar three-system">
+    <div class="system-item">
+      <strong>Gmail + Sent</strong>
+      <span id="gmailState" class="pill neutral">Checking…</span>
+      <span id="gmailDetail" class="helper"></span>
+    </div>
+    <div class="system-item">
+      <strong>Google Chat</strong>
+      <span id="chatState" class="pill neutral">Checking…</span>
+      <span id="chatDetail" class="helper"></span>
+    </div>
+    <div class="system-item">
+      <strong>OpenAI</strong>
+      <span id="aiState" class="pill neutral">Checking…</span>
+      <span id="aiDetail" class="helper"></span>
+    </div>
+    <div class="system-actions full-system-actions">
+      <label class="checkline"><input id="autoAdd" type="checkbox"> Auto-add AI detections</label><label class="checkline"><input id="autoInvoices" type="checkbox"> Auto-add incoming invoices to Finances</label>
+      <a id="connectGoogle" href="/gmail/connect" class="button primary hidden">Connect Google</a>
+      <button id="syncAll" class="button secondary hidden">Sync Mail + Sent + Chat</button>
+    </div>
+  </section>
+
+  <nav class="tabs" aria-label="Dashboard sections">
+    <button class="tab active" data-tab="client">Client Tasks <span id="tabClientCount">0</span></button>
+    <button class="tab" data-tab="payment">Finances <span id="tabPaymentCount">0</span></button>
+    <button class="tab" data-tab="invoice">Invoices to Pay <span id="tabInvoiceCount">0</span></button>
+    <button class="tab" data-tab="sent">Sent Follow-ups <span id="tabSentCount">0</span></button>
+    <button class="tab" data-tab="gmail">Gmail Review <span id="tabGmailCount">0</span></button>
+    <button class="tab" data-tab="chat">Chat Review <span id="tabChatCount">0</span></button>
+    <button class="tab" data-tab="meetings">Meeting Recaps <span id="tabMeetingCount">0</span></button>
+    <button class="tab" data-tab="completed">Completed <span id="tabCompletedCount">0</span></button>
+  </nav>
+
+  <section id="clientView" class="view">
+    <section class="metrics">
+      <button class="metric score-blue" data-quick="client-all"><span>Open Client Tasks</span><strong id="clientCount">0</strong><small>Click to show all</small></button>
+      <button class="metric score-red" data-quick="client-urgent"><span>Urgent</span><strong id="clientUrgent">0</strong><small>Click to filter</small></button>
+      <button class="metric score-orange" data-quick="client-due"><span>Due / Overdue</span><strong id="clientDue">0</strong><small>Click to filter</small></button>
+      <button class="metric score-purple" data-quick="client-waiting"><span>Waiting</span><strong id="clientWaiting">0</strong><small>Click to filter</small></button>
+    </section>
+  </section>
+
+  <section id="paymentView" class="view hidden">
+    <section class="metrics">
+      <button class="metric score-red" data-quick="payment-all"><span>Payment Items</span><strong id="payCount">0</strong><small>Click to show all</small></button>
+      <button class="metric score-blue" data-quick="payment-known"><span>Known Amount Due</span><strong id="payTotal">$0</strong><small>Only items with amounts</small></button>
+      <button class="metric score-orange" data-quick="payment-overdue"><span>Overdue Items</span><strong id="payOverdue">0</strong><small>Click to filter</small></button>
+      <button class="metric score-purple" data-quick="payment-overdue-known"><span>Overdue Known Amount</span><strong id="payOverdueTotal">$0</strong><small>Overdue with amount</small></button>
+    </section>
+    <div class="callout"><strong>Finances / Bills to Pay:</strong> incoming invoices with high or medium AI confidence are automatically added here. Payment details stay separate from client tasks. Use <strong>Mark Paid</strong> to check an item off while preserving its payment history.</div>
+  </section>
+
+  <section id="invoiceView" class="view hidden">
+    <section class="metrics">
+      <button class="metric score-purple" data-quick="invoice-all"><span>Invoices to Pay</span><strong id="invoiceCount">0</strong><small>Click to show all</small></button>
+      <button class="metric score-green" data-quick="invoice-known"><span>Known Invoice Total</span><strong id="invoiceTotal">$0</strong><small>Invoices with amounts</small></button>
+      <button class="metric score-red" data-quick="invoice-overdue"><span>Overdue Invoices</span><strong id="invoiceOverdue">0</strong><small>Click to filter</small></button>
+      <button class="metric score-orange" data-quick="invoice-missing"><span>Without Amount</span><strong id="invoiceNoAmount">0</strong><small>Needs amount entered</small></button>
+    </section>
+    <div class="callout">Only open payment items flagged <strong>Invoice Sent</strong> appear here.</div>
+  </section>
+
+  <section id="sentView" class="view hidden">
+    <section class="metrics">
+      <button class="metric score-blue" data-sent-quick="all"><span>Waiting on Replies</span><strong id="sentCount">0</strong><small>Click to show all</small></button>
+      <button class="metric score-red" data-sent-quick="due"><span>Follow-up Due</span><strong id="sentDue">0</strong><small>Due or overdue</small></button>
+      <button class="metric score-purple" data-sent-quick="linked"><span>Linked to Tasks</span><strong id="sentLinked">0</strong><small>Already attached</small></button>
+      <button class="metric score-orange" data-sent-quick="multi"><span>Multi-recipient</span><strong id="sentMulti">0</strong><small>Important group chains</small></button>
+    </section>
+    <div class="callout">Sent mail is monitored for promises, approvals, deliverables and unanswered requests. Replies in the same chain are tracked so you can see what still needs follow-up.</div>
+    <div id="sentList" class="task-list"></div>
+  </section>
+
+  <section id="gmailView" class="view hidden">
+    <div class="callout">Automatic new-task discovery focuses on the last 30 days. Multi-recipient messages are treated as important, while later messages in an existing task chain are attached to that task and can raise it to <strong>URGENT</strong>.</div>
+    <div id="suggestionList" class="suggestions"></div>
+  </section>
+
+  <section id="chatView" class="view hidden">
+    <div class="callout">Google Chat spaces and direct messages are scanned for action items. New messages that materially continue an existing Chat task are attached to that task and make it <strong>URGENT</strong>.</div>
+    <div id="chatSuggestionList" class="suggestions"></div>
+  </section>
+
+  <section id="meetingsView" class="view hidden">
+    <div class="callout"><strong>Gemini meeting recap review:</strong> meeting summaries are held here instead of auto-creating tasks. When a recap contains multiple action items, choose which ones to add and confirm or change the assignee first.</div>
+    <div id="meetingList" class="suggestions"></div>
+  </section>
+
+  <section id="completedView" class="view hidden"></section>
+
+  <section id="taskControls" class="filters">
+    <label>Search<input id="search" type="search" placeholder="Search task, client, vendor, assignee or participant"></label>
+    <label>Status
+      <select id="statusFilter"><option value="all">All Statuses</option><option>Open</option><option>Working</option><option>Waiting</option><option>Blocked</option></select>
+    </label>
+    <div class="filter-button"><button id="clearQuickFilter" class="button secondary hidden">Clear Scorecard Filter</button></div>
+    <div class="filter-button"><button id="addTaskBtn" class="button secondary">+ Add Task</button></div>
+  </section>
+
+  <section id="newTaskPanel" class="panel hidden">
+    <h2>Add Task</h2>
+    <div class="formgrid">
+      <label>Client / Vendor<input id="newParty"></label>
+      <label>Assignee<input id="newAssignee" placeholder="Optional"></label>
+      <label>Category<select id="newCategory"><option value="client">Client Task</option><option value="payment">Payment</option></select></label>
+      <label>Priority<select id="newPriority"><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+      <label class="span2">What needs done?<input id="newTitle"></label>
+      <label>Deadline<input id="newDue" type="date"></label>
+      <label>Amount<input id="newAmount" type="number" step="0.01" min="0"></label>
+      <label>Invoice #<input id="newInvoiceNumber"></label>
+      <label class="checkline"><input id="newInvoiceSent" type="checkbox"> Invoice Sent / Presented for Payment</label>
+      <label class="span2">Detail<textarea id="newDetail" rows="2"></textarea></label>
+    </div>
+    <div class="row"><button id="saveNewTask" class="button primary">Save Task</button><button id="cancelNewTask" class="button secondary">Cancel</button></div>
+  </section>
+
+  <section id="taskList" class="task-list"></section>
 </main>
-<dialog id="replyDialog"><form method="dialog" class="reply-box"><div class="dialog-head"><h2>Prepare Reply</h2><button class="icon-button" value="cancel">×</button></div><label>To<input id="replyTo" type="email"></label><label>Subject<input id="replySubject"></label><label>Message<textarea id="replyBody" rows="10"></textarea></label><div class="row"><a id="openGmailCompose" class="button primary" target="_blank" rel="noopener">Open Draft in Gmail</a><button class="button secondary" value="cancel">Close</button></div><p class="helper">This opens a Gmail compose window. Direct send can be added later with Google OAuth.</p></form></dialog>
-<script src="{{ url_for('static', filename='app.js') }}"></script></body></html>
+
+<dialog id="replyDialog">
+  <div class="dialog-box">
+    <div class="dialog-head"><h2>Prepare Response</h2><button class="icon-button" data-close-dialog="replyDialog">×</button></div>
+    <label>To<input id="replyTo" type="email"></label>
+    <label>Subject<input id="replySubject"></label>
+    <label>Message<textarea id="replyBody" rows="11"></textarea></label>
+    <div class="row">
+      <button id="saveGmailDraft" class="button secondary">Save Gmail Draft</button>
+      <button id="sendGmailReply" class="button primary">Send Email</button>
+      <a id="openGmailCompose" class="button secondary" target="_blank" rel="noopener">Open in Gmail</a>
+      <a id="openReplySource" class="button secondary hidden" target="_blank" rel="noopener">Open Source</a>
+    </div>
+    <div id="replyStatus" class="helper"></div>
+  </div>
+</dialog>
+
+<dialog id="gmailDiscoveryDialog">
+  <div class="dialog-box wide-dialog">
+    <div class="dialog-head"><div><h2>Ask Gmail for Tasks</h2><p class="helper">Ask naturally, for example: “Find anything I still need to do for Icon Solar.” Manual questions can search your entire Gmail history, not only the 30-day automatic task window.</p></div><button class="icon-button" data-close-dialog="gmailDiscoveryDialog">×</button></div>
+    <div class="voice-search-row">
+      <label class="grow">Ask your email<input id="gmailDiscoveryQuery" placeholder="Find open tasks for Icon Solar"></label>
+      <button id="voiceInputBtn" class="button secondary voice-button" type="button">🎤 Talk</button>
+      <button id="runDiscoveryBtn" class="button primary" type="button">Search Gmail</button>
+    </div>
+    <div id="discoveryStatus" class="helper"></div>
+    <div id="discoveryResults" class="discovery-results"></div>
+    <div class="row"><button id="addSelectedDiscovery" class="button primary hidden">Add Selected Tasks</button></div>
+  </div>
+</dialog>
+
+<dialog id="watchDomainsDialog">
+  <div class="dialog-box">
+    <div class="dialog-head"><div><h2>Highly Watched Domains</h2><p class="helper">Mail from these domains gets an additional scan and actionable items receive at least High priority.</p></div><button class="icon-button" data-close-dialog="watchDomainsDialog">×</button></div>
+    <div class="formgrid">
+      <label>Domain<input id="watchDomainInput" placeholder="iconsolar.com"></label>
+      <label>Label (optional)<input id="watchDomainLabel" placeholder="Icon Solar"></label>
+    </div>
+    <div class="row"><button id="addWatchDomain" class="button primary">Add Watch Domain</button></div>
+    <div id="watchDomainStatus" class="helper"></div>
+    <div id="watchDomainList" class="watch-list"></div>
+  </div>
+</dialog>
+
+
+<dialog id="chatReplyDialog">
+  <div class="dialog-box">
+    <div class="dialog-head">
+      <h2>Reply in Google Chat</h2>
+      <button class="icon-button" data-close-dialog="chatReplyDialog">×</button>
+    </div>
+    <div id="chatReplyContext" class="callout"></div>
+    <label>Message<textarea id="chatReplyBody" rows="8" placeholder="Write your Google Chat reply..."></textarea></label>
+    <div class="row">
+      <button id="sendChatReply" class="button primary">Send Chat Reply</button>
+      <button class="button secondary" data-close-dialog="chatReplyDialog">Cancel</button>
+    </div>
+    <div id="chatReplyStatus" class="helper"></div>
+  </div>
+</dialog>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
