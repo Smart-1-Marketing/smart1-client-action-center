@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in | Smart 1 Client Action Center</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
+<body class="login-body"><main class="login-card">
+<h1>Smart 1 Client Action Center</h1><p>Enter the private password configured in Render.</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post"><label>Password<input type="password" name="password" required autofocus></label>
+<button class="button primary" type="submit">Sign in</button></form></main></body></html>
