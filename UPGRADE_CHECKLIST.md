@@ -124,3 +124,26 @@ After redeploy:
 4. **Finances** remains the open bills/payments working dashboard.
 5. Full GPT prompts are generated only when **Prepare GPT Prompt** is clicked.
 6. Use **Don't Suggest GPT Help for This Type** when a valid task should no longer get GPT-help suggestions.
+## Chat Diagnostics + Memory update
+
+Replace:
+```text
+app.py
+templates/index.html
+static/app.js
+static/style.css
+render.yaml
+.python-version
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Do not delete `/var/data/tasks.db`.
+
+After deploy:
+1. Click **Check Chat**.
+2. Confirm **Chat Read Permission = YES**.
+3. Confirm Google returns at least one space.
+4. Review any exact API errors shown.
+5. Run **Sync Mail + Sent + Chat**.
+6. Watch Render memory for several sync cycles.

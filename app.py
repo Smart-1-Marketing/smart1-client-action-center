@@ -7,6 +7,7 @@ import threading
 import time
 import traceback
 import html
+import gc
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
@@ -66,11 +67,12 @@ SYNC_LOCK = threading.Lock()
 
 # Google user authorization for Gmail plus read-only Google Chat.
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
-CHAT_SCOPES = [
+CHAT_READ_SCOPES = [
     "https://www.googleapis.com/auth/chat.spaces.readonly",
     "https://www.googleapis.com/auth/chat.messages.readonly",
-    "https://www.googleapis.com/auth/chat.messages.create",
 ]
+CHAT_SEND_SCOPE = "https://www.googleapis.com/auth/chat.messages.create"
+CHAT_SCOPES = [*CHAT_READ_SCOPES, CHAT_SEND_SCOPE]
 GOOGLE_SCOPES = [GMAIL_SCOPE, *CHAT_SCOPES]
 
 SEED_TASKS = [
@@ -643,9 +645,11 @@ def gmail_service():
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
-def chat_service():
+def chat_service(require_send=False):
+    """Build Google Chat with only the permission needed for the requested action."""
     creds = load_credentials()
-    if not creds or not credentials_have_scopes(creds, CHAT_SCOPES):
+    required = CHAT_SCOPES if require_send else CHAT_READ_SCOPES
+    if not creds or not credentials_have_scopes(creds, required):
         return None
     return build("chat", "v1", credentials=creds, cache_discovery=False)
 
@@ -966,11 +970,24 @@ def gmail_thread_context(service, thread_id, limit=12, char_budget=14000):
 
 # ---------------- OpenAI structured helpers ----------------
 
+_OPENAI_CLIENT = None
+_OPENAI_CLIENT_LOCK = threading.Lock()
+
+
+def openai_client():
+    """Reuse one OpenAI HTTP connection pool instead of one client per AI call."""
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is None:
+        with _OPENAI_CLIENT_LOCK:
+            if _OPENAI_CLIENT is None:
+                _OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
+    return _OPENAI_CLIENT
+
+
 def openai_json(prompt, schema, name):
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    response = client.responses.create(
+    response = openai_client().responses.create(
         model=OPENAI_MODEL,
         input=prompt,
         store=False,
@@ -2332,6 +2349,89 @@ def sync_sent_mail():
     }
 
 
+def granted_scope_list(creds):
+    return sorted(
+        set(getattr(creds, "granted_scopes", None) or [])
+        | set(getattr(creds, "scopes", None) or [])
+    )
+
+
+def chat_diagnostics_report():
+    """Test Google Chat directly. This does not call OpenAI."""
+    creds = load_credentials()
+    granted = granted_scope_list(creds) if creds else []
+    read_ok = credentials_have_scopes(creds, CHAT_READ_SCOPES)
+    send_ok = credentials_have_scopes(creds, [CHAT_SEND_SCOPE])
+
+    result = {
+        "credentials_present": bool(creds),
+        "read_scope_ok": read_ok,
+        "send_scope_ok": send_ok,
+        "granted_scopes": granted,
+        "space_count": 0,
+        "space_types": {},
+        "recent_message_samples": 0,
+        "sampled_spaces": [],
+        "errors": [],
+        "lookback_days": CHAT_SYNC_LOOKBACK_DAYS,
+    }
+
+    if not read_ok:
+        result["errors"].append(
+            "Google authorization does not include both Chat read scopes."
+        )
+        return result
+
+    service = chat_service()
+    if not service:
+        result["errors"].append("Could not build Google Chat API service.")
+        return result
+
+    try:
+        # Deliberately use no filter in diagnostics. Google should return every
+        # visible space type for the authenticated user.
+        resp = service.spaces().list(pageSize=100).execute()
+        spaces = resp.get("spaces", [])
+        result["space_count"] = len(spaces)
+        for space in spaces:
+            stype = space.get("spaceType", "UNKNOWN")
+            result["space_types"][stype] = result["space_types"].get(stype, 0) + 1
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=CHAT_SYNC_LOOKBACK_DAYS)
+        cutoff_text = cutoff.isoformat().replace("+00:00", "Z")
+
+        # Sample at most 12 spaces and 5 messages each so this remains light.
+        for space in spaces[:12]:
+            row = {
+                "name": space.get("name", ""),
+                "display_name": space.get("displayName", ""),
+                "space_type": space.get("spaceType", ""),
+                "recent_messages_visible": 0,
+                "error": "",
+            }
+            try:
+                msg_resp = service.spaces().messages().list(
+                    parent=space.get("name", ""),
+                    pageSize=5,
+                    filter=f'createTime > "{cutoff_text}"',
+                    orderBy="createTime DESC",
+                ).execute()
+                count = len(msg_resp.get("messages", []))
+                row["recent_messages_visible"] = count
+                result["recent_message_samples"] += count
+            except Exception as exc:
+                row["error"] = f"{type(exc).__name__}: {exc}"
+                result["errors"].append(
+                    f"{space.get('displayName') or space.get('name')}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            result["sampled_spaces"].append(row)
+    except Exception as exc:
+        result["errors"].append(f"{type(exc).__name__}: {exc}")
+
+    return result
+
+
 def chat_list_spaces(service):
     spaces = []
     token = None
@@ -2512,10 +2612,15 @@ def sync_google_chat():
         return {"connected": False, "spaces": 0, "checked": 0, "analyzed": 0, "added": 0, "updates": 0}
     spaces = chat_list_spaces(service)
     checked = analyzed = added = updates = 0
+    space_errors = []
     for space in spaces:
         try:
             messages = chat_list_messages(service, space.get("name", ""))
-        except Exception:
+        except Exception as exc:
+            space_errors.append(
+                f"{space.get('displayName') or space.get('name')}: "
+                f"{type(exc).__name__}: {exc}"
+            )
             continue
         for msg in messages:
             name = msg.get("name", "")
@@ -2589,8 +2694,16 @@ def sync_google_chat():
                 except sqlite3.IntegrityError:
                     pass
     set_setting("chat_last_sync", datetime.now().astimezone().isoformat())
-    set_setting("chat_last_error", "")
-    return {"connected": True, "spaces": len(spaces), "checked": checked, "analyzed": analyzed, "added": added, "updates": updates}
+    set_setting("chat_last_error", space_errors[0] if space_errors else "")
+    return {
+        "connected": True,
+        "spaces": len(spaces),
+        "checked": checked,
+        "analyzed": analyzed,
+        "added": added,
+        "updates": updates,
+        "space_errors": space_errors[:10],
+    }
 
 
 def create_or_update_gpt_help(task_id):
@@ -2660,6 +2773,8 @@ def background_sync_loop():
                 sync_all_communications()
         except Exception as exc:
             set_setting("gmail_last_error", str(exc))
+        finally:
+            gc.collect()
         time.sleep(max(60, AUTO_GMAIL_SYNC_MINUTES * 60))
 
 
@@ -2671,20 +2786,20 @@ if AUTO_GMAIL_SYNC_MINUTES > 0 and os.environ.get("DISABLE_BACKGROUND_GMAIL_SYNC
 
 def serialize_task(row, con):
     notes = con.execute(
-        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC", (row["id"],)
+        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 8", (row["id"],)
     ).fetchall()
     research = con.execute(
-        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 8",
+        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 4",
         (row["id"],)
     ).fetchall()
     updates = con.execute(
         "SELECT id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails,created_at "
-        "FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 12",
+        "FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 6",
         (row["id"],)
     ).fetchall()
     chat_updates = con.execute(
         "SELECT id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction,created_at "
-        "FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 20",
+        "FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 8",
         (row["id"],)
     ).fetchall()
     participants = con.execute(
@@ -2918,16 +3033,32 @@ def gmail_callback():
         return google_oauth_error_page("Google Connection Failed", detail, 400)
 
 
+@app.get("/api/chat/diagnostics")
+@login_required
+def chat_diagnostics():
+    try:
+        return jsonify(chat_diagnostics_report())
+    except Exception as exc:
+        app.logger.exception("Chat diagnostics failed")
+        return jsonify({
+            "error": f"{type(exc).__name__}: {exc}",
+            "errors": [f"{type(exc).__name__}: {exc}"],
+        }), 500
+
+
 @app.get("/api/system/status")
 @login_required
 def system_status():
     creds = load_credentials()
     gmail_connected = credentials_have_scopes(creds, [GMAIL_SCOPE])
-    chat_connected = credentials_have_scopes(creds, CHAT_SCOPES)
+    chat_connected = credentials_have_scopes(creds, CHAT_READ_SCOPES)
+    chat_send_enabled = credentials_have_scopes(creds, [CHAT_SEND_SCOPE])
     return jsonify({
         "google_configured": gmail_configured(),
         "gmail_connected": gmail_connected,
         "chat_connected": chat_connected,
+        "chat_send_enabled": chat_send_enabled,
+        "chat_send_scope_upgrade_needed": bool(creds and chat_connected and not chat_send_enabled),
         "google_scope_upgrade_needed": bool(creds and gmail_connected and not chat_connected),
         "gmail_last_sync": get_setting("gmail_last_sync", ""),
         "gmail_last_error": get_setting("gmail_last_error", ""),
@@ -2947,7 +3078,6 @@ def system_status():
         "new_task_window_days": 30,
         "research_searches_all_history": True,
         "auto_add_invoices": get_setting("auto_add_invoices", "1") == "1",
-        "chat_send_enabled": chat_connected,
         "not_task_training_count": len(not_task_examples("gmail", 500)) + len(not_task_examples("chat", 500)),
         "xwf_google_ignored": ignored_source("gmail", "notice@xwf.google.com", "xwf.google.com"),
     })
@@ -3708,7 +3838,7 @@ def task_email_research(task_id):
 @app.post("/api/tasks/<int:task_id>/chat/reply")
 @login_required
 def send_chat_reply(task_id):
-    service = chat_service()
+    service = chat_service(require_send=True)
     if not service:
         return jsonify({"error": "Google Chat is not connected with send permission. Reconnect Google after adding chat.messages.create."}), 400
 

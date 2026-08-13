@@ -5,7 +5,7 @@ services:
     region: ohio
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --workers 1 --threads 4 --timeout 180 app:app
+    startCommand: gunicorn --workers 1 --threads 2 --timeout 180 --max-requests 250 --max-requests-jitter 25 app:app
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
@@ -32,9 +32,9 @@ services:
       - key: GMAIL_SCAN_MAX_MESSAGES
         value: "500"
       - key: GMAIL_ANALYZE_MAX_NEW
-        value: "75"
+        value: "40"
       - key: OPENAI_EMAIL_BODY_CHARS
-        value: "12000"
+        value: "8000"
       - key: EMAIL_RESEARCH_MAX_MESSAGES
         value: "500"
       - key: EMAIL_DISCOVERY_MAX_MESSAGES
@@ -46,17 +46,17 @@ services:
       - key: SENT_FOLLOWUP_AFTER_DAYS
         value: "3"
       - key: SENT_SCAN_MAX_MESSAGES
-        value: "300"
+        value: "200"
       - key: CHAT_SYNC_LOOKBACK_DAYS
         value: "30"
       - key: CHAT_SCAN_MAX_SPACES
         value: "100"
       - key: CHAT_SCAN_MAX_MESSAGES_PER_SPACE
-        value: "100"
+        value: "75"
       - key: WATCH_DOMAIN_LOOKBACK_DAYS
         value: "90"
       - key: AI_CONTEXT_CHAR_BUDGET
-        value: "90000"
+        value: "60000"
     disk:
       name: smart1-action-data
       mountPath: /var/data

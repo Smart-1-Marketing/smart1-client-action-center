@@ -431,3 +431,47 @@ This saves a subject-template + sender-domain suppression rule so similar emails
 This is separate from **Not a Task — Train**:
 - Not a Task = the communication itself should not become a task.
 - Don't Suggest GPT Help = it can remain a valid task, but stop recommending GPT assistance for that type.
+## Google Chat diagnostics and permission split
+
+The top system bar now includes **Check Chat**.
+
+The diagnostic makes direct Google Chat API calls and does not call OpenAI. It reports:
+- Chat read permission
+- Chat send permission
+- number of spaces returned
+- counts by space type
+- recent message samples
+- exact API errors for sampled spaces
+
+Reading Chat now depends only on:
+```text
+https://www.googleapis.com/auth/chat.spaces.readonly
+https://www.googleapis.com/auth/chat.messages.readonly
+```
+
+Sending Chat replies separately requires:
+```text
+https://www.googleapis.com/auth/chat.messages.create
+```
+
+A missing send permission therefore no longer prevents Chat from being scanned.
+
+## Render memory optimization
+
+Changes in this release:
+- reuse one OpenAI HTTP client instead of constructing a client for every AI request
+- load dashboard endpoints sequentially instead of nine simultaneously
+- return smaller task history payloads on dashboard list calls
+- run Python garbage collection after background communications sweeps
+- reduce Gunicorn from 4 threads to 2
+- recycle Gunicorn workers periodically with `--max-requests`
+- reduce background AI message/context defaults while preserving the 30-day logic
+
+Recommended tuned defaults in `render.yaml`:
+- `GMAIL_ANALYZE_MAX_NEW=40`
+- `OPENAI_EMAIL_BODY_CHARS=8000`
+- `SENT_SCAN_MAX_MESSAGES=200`
+- `CHAT_SCAN_MAX_MESSAGES_PER_SPACE=75`
+- `AI_CONTEXT_CHAR_BUDGET=60000`
+
+The app remains on one Gunicorn worker because the background sync is in-process and should not be duplicated.

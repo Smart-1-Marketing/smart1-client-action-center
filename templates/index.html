@@ -41,6 +41,7 @@
       <label class="checkline"><input id="autoAdd" type="checkbox"> Auto-add AI detections</label><label class="checkline"><input id="autoInvoices" type="checkbox"> Auto-add incoming invoices to Finances</label>
       <a id="connectGoogle" href="/gmail/connect" class="button primary hidden">Connect Google</a>
       <button id="syncAll" class="button secondary hidden">Sync Mail + Sent + Chat</button>
+      <button id="checkChat" class="button secondary">Check Chat</button>
     </div>
   </section>
 
@@ -206,6 +207,23 @@
       <button class="button secondary" data-close-dialog="chatReplyDialog">Cancel</button>
     </div>
     <div id="chatReplyStatus" class="helper"></div>
+  </div>
+</dialog>
+
+
+<dialog id="chatDiagnosticsDialog">
+  <div class="dialog-box wide-dialog">
+    <div class="dialog-head">
+      <h2>Google Chat Diagnostics</h2>
+      <button class="icon-button" data-close-dialog="chatDiagnosticsDialog">×</button>
+    </div>
+    <div id="chatDiagnosticsBody" class="diagnostics-body">
+      <div class="helper">This check talks directly to Google Chat and does not use OpenAI.</div>
+    </div>
+    <div class="row">
+      <button id="runChatDiagnostics" class="button primary">Run Chat Check</button>
+      <button class="button secondary" data-close-dialog="chatDiagnosticsDialog">Close</button>
+    </div>
   </div>
 </dialog>
 

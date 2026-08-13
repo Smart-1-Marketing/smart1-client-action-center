@@ -195,15 +195,56 @@ async function loadSystem(){
   state.system=await api("/api/system/status");const s=state.system;
   el("gmailState").textContent=s.gmail_connected?"Connected":s.google_configured?"Not connected":"Needs setup";el("gmailState").className=`pill ${s.gmail_connected?"ok":"neutral"}`;
   const mailBits=[];if(s.gmail_last_sync)mailBits.push(`Inbox ${safeDate(s.gmail_last_sync)}`);if(s.sent_last_sync)mailBits.push(`Sent ${safeDate(s.sent_last_sync)}`);if(s.meeting_last_sync)mailBits.push(`Meetings ${safeDate(s.meeting_last_sync)}`);if(s.gmail_last_error)mailBits.push(`Error: ${s.gmail_last_error}`);el("gmailDetail").textContent=mailBits.join(" · ");
-  el("chatState").textContent=s.chat_connected?"Connected":s.google_scope_upgrade_needed?"Reconnect Google":"Not connected";el("chatState").className=`pill ${s.chat_connected?"ok":s.google_scope_upgrade_needed?"bad":"neutral"}`;el("chatDetail").textContent=s.chat_connected?(s.chat_last_sync?`Last sync ${safeDate(s.chat_last_sync)}`:"Ready to sync"):(s.google_scope_upgrade_needed?"Reconnect once to grant the Google Chat read scopes.":"");
+  el("chatState").textContent=s.chat_connected?"Read Connected":s.google_scope_upgrade_needed?"Reconnect Google":"Not connected";el("chatState").className=`pill ${s.chat_connected?"ok":s.google_scope_upgrade_needed?"bad":"neutral"}`;const chatBits=[];if(s.chat_connected)chatBits.push(s.chat_last_sync?`Last sync ${safeDate(s.chat_last_sync)}`:"Ready to sync");if(s.chat_connected)chatBits.push(s.chat_send_enabled?"Replies enabled":"Read only — reconnect for replies");if(s.chat_last_error)chatBits.push(`Error: ${s.chat_last_error}`);if(!s.chat_connected&&s.google_scope_upgrade_needed)chatBits.push("Reconnect once to grant the Google Chat read scopes.");el("chatDetail").textContent=chatBits.join(" · ");
   el("aiState").textContent=s.openai_configured?"AI Analyzer On":"Fallback Only";el("aiState").className=`pill ${s.openai_configured?"ok":"neutral"}`;el("aiDetail").textContent=s.openai_configured?`Model: ${s.openai_model}${s.openai_last_error?" · Last error: "+s.openai_last_error:""}`:"Add OPENAI_API_KEY in Render.";
   const showConnect=!s.gmail_connected||s.google_scope_upgrade_needed;el("connectGoogle").classList.toggle("hidden",!showConnect||!s.google_configured);el("connectGoogle").textContent=s.google_scope_upgrade_needed?"Reconnect Google for Chat":"Connect Google";el("syncAll").classList.toggle("hidden",!s.gmail_connected);el("autoAdd").checked=!!s.gmail_auto_add;el("autoInvoices").checked=s.auto_add_invoices!==false;el("autoAdd").disabled=!s.gmail_connected;
 }
+
+function diagnosticSpaceRow(s){
+  return `<tr><td>${esc(s.display_name||s.name||"Unnamed")}</td><td>${esc(s.space_type||"")}</td><td>${Number(s.recent_messages_visible||0)}</td><td>${esc(s.error||"")}</td></tr>`;
+}
+function renderChatDiagnostics(d){
+  const errors=d.errors||[];
+  const types=Object.entries(d.space_types||{}).map(([k,v])=>`${esc(k)}: ${v}`).join(" · ")||"None";
+  el("chatDiagnosticsBody").innerHTML=`
+    <div class="diagnostic-grid">
+      <div class="diagnostic-card"><span>Chat Read Permission</span><strong>${d.read_scope_ok?"YES":"NO"}</strong></div>
+      <div class="diagnostic-card"><span>Chat Send Permission</span><strong>${d.send_scope_ok?"YES":"NO"}</strong></div>
+      <div class="diagnostic-card"><span>Spaces Google Returned</span><strong>${Number(d.space_count||0)}</strong></div>
+      <div class="diagnostic-card"><span>Recent Sample Messages</span><strong>${Number(d.recent_message_samples||0)}</strong></div>
+    </div>
+    <div class="callout"><strong>Space types:</strong> ${types}<br><strong>Lookback:</strong> ${Number(d.lookback_days||30)} days. No OpenAI call is made by this diagnostic.</div>
+    ${errors.length?`<div class="diagnostic-errors"><strong>Errors</strong>${errors.map(x=>`<div>${esc(x)}</div>`).join("")}</div>`:""}
+    <div class="table-wrap"><table class="diagnostic-table"><thead><tr><th>Space</th><th>Type</th><th>Recent sample</th><th>Error</th></tr></thead><tbody>${(d.sampled_spaces||[]).map(diagnosticSpaceRow).join("")}</tbody></table></div>`;
+}
+async function runChatDiagnostics(){
+  el("runChatDiagnostics").disabled=true;
+  el("runChatDiagnostics").textContent="Checking…";
+  el("chatDiagnosticsBody").innerHTML=`<div class="helper">Testing scopes, spaces, and recent messages directly with Google Chat…</div>`;
+  try{
+    const d=await api("/api/chat/diagnostics");
+    renderChatDiagnostics(d);
+  }catch(err){
+    el("chatDiagnosticsBody").innerHTML=`<div class="diagnostic-errors"><strong>Chat check failed</strong><div>${esc(err.message)}</div></div>`;
+  }finally{
+    el("runChatDiagnostics").disabled=false;
+    el("runChatDiagnostics").textContent="Run Chat Check";
+  }
+}
+
 async function load(){
-  const [client,payment,invoice,history,gmailSuggestions,chatSuggestions,sentFollowups,meetingReviews,summary]=await Promise.all([
-    api("/api/tasks?category=client"),api("/api/tasks?category=payment"),api("/api/invoices"),api("/api/tasks?completed=1"),api("/api/gmail/suggestions"),api("/api/chat/suggestions"),api("/api/sent-followups"),api("/api/meetings/reviews"),api("/api/payment-summary")
-  ]);
-  Object.assign(state,{client,payment,invoice,history,gmailSuggestions,chatSuggestions,sentFollowups,meetingReviews,summary});renderMetrics();renderGmailSuggestions();renderChatSuggestions();renderMeetings();renderSent();updateViews();await loadSystem();
+  // Load in stages instead of issuing nine memory-heavy requests at once.
+  await loadSystem();
+  state.summary=await api("/api/payment-summary");
+  state.client=await api("/api/tasks?category=client");
+  state.payment=await api("/api/tasks?category=payment");
+  state.invoice=await api("/api/invoices");
+  state.history=await api("/api/tasks?completed=1");
+  state.gmailSuggestions=await api("/api/gmail/suggestions");
+  state.chatSuggestions=await api("/api/chat/suggestions");
+  state.sentFollowups=await api("/api/sent-followups");
+  state.meetingReviews=await api("/api/meetings/reviews");
+  renderMetrics();renderGmailSuggestions();renderChatSuggestions();renderMeetings();renderSent();updateViews();
 }
 function showPanel(id,html){const box=el(`reveal-${id}`);box.innerHTML=html;box.className="reveal"}
 
@@ -298,6 +339,8 @@ el("sentList").addEventListener("click",async e=>{const create=e.target.closest(
 el("meetingList").addEventListener("click",async e=>{const add=e.target.closest("[data-meeting-add]"),dismiss=e.target.closest("[data-meeting-dismiss]");if(add){const id=Number(add.dataset.meetingAdd),selected=[...document.querySelectorAll(`[data-meeting-task="${id}"]:checked`)].map(cb=>{const index=Number(cb.dataset.taskIndex),input=document.querySelector(`[data-meeting-assignee="${id}"][data-task-index="${index}"]`);return{index,assignee:input?.value.trim()||""}});if(!selected.length)return;const status=el(`meeting-status-${id}`);add.disabled=true;status.textContent="Adding selected meeting tasks…";try{const r=await api(`/api/meetings/reviews/${id}/add`,{method:"POST",body:JSON.stringify({tasks:selected})});status.textContent=`Added ${r.added} task(s).`;await load();state.tab="client";updateViews()}catch(err){status.textContent=err.message}finally{add.disabled=false}}if(dismiss){await api(`/api/meetings/reviews/${dismiss.dataset.meetingDismiss}/dismiss`,{method:"POST"});await load()}});
 
 // Full communications sync.
+el("checkChat").addEventListener("click",()=>{el("chatDiagnosticsDialog").showModal();runChatDiagnostics()});
+el("runChatDiagnostics").addEventListener("click",runChatDiagnostics);
 el("syncAll").addEventListener("click",async()=>{el("syncAll").disabled=true;el("syncAll").textContent="Syncing…";try{const r=await api("/api/communications/sync",{method:"POST"});await load();if(r.busy){el("gmailDetail").textContent="A communications sync is already running."}else{const g=r.gmail||{},s=r.sent||{},c=r.chat||{},m=r.meetings||{};el("gmailDetail").textContent=`Inbox: ${g.added||0} new task candidate(s), ${g.updates||0} task update(s). Sent: ${s.new_monitors||0} follow-up(s), ${s.resolution_reviews||0} possible resolution(s). Chat: ${c.added||0} candidate(s), ${c.updates||0} task update(s). Meeting recaps: ${m.added||0} new review(s).`}}catch(err){el("gmailDetail").textContent=`Sync failed: ${err.message}`}finally{el("syncAll").disabled=false;el("syncAll").textContent="Sync Mail + Sent + Chat"}});
 el("autoAdd").addEventListener("change",async()=>{await api("/api/settings",{method:"PATCH",body:JSON.stringify({gmail_auto_add:el("autoAdd").checked})});await loadSystem()});
 el("autoInvoices").addEventListener("change",async()=>{await api("/api/settings",{method:"PATCH",body:JSON.stringify({auto_add_invoices:el("autoInvoices").checked})});await loadSystem()});
