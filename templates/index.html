@@ -8,42 +8,17 @@
 </head>
 <body>
 <main class="page">
-  <header class="topbar">
-    <div>
-      <h1>Smart 1 Client Action Center</h1>
-      <p>AI-assisted Gmail, Sent mail, Google Chat, meeting recaps, client actions, payments and follow-up monitoring.</p>
-    </div>
-    <div class="header-actions">
-      <button id="gmailTalkBtn" class="button primary">Ask Gmail for Tasks</button>
-      <button id="watchDomainsBtn" class="button secondary">Watch Domains</button>
-      <button id="themeToggle" class="button secondary" aria-label="Toggle dark mode">Dark Mode</button>
+  <header class="topbar compact-topbar">
+    <div class="compact-brand"><h1>Smart 1 Client Action Center</h1></div>
+    <div class="header-actions compact-header-actions">
+      <button id="gmailTalkBtn" class="button primary">Ask Gmail</button>
+      <button id="syncAll" class="button primary">Sync</button>
+      <span id="syncStatus" class="sync-status">Ready</span>
+      <button id="settingsBtn" class="button secondary">Settings</button>
+      <button id="diagnosticsBtn" class="button secondary">Diagnostics</button>
       <a class="button secondary" href="/logout">Sign out</a>
     </div>
   </header>
-
-  <section class="system-bar three-system">
-    <div class="system-item">
-      <strong>Gmail + Sent</strong>
-      <span id="gmailState" class="pill neutral">Checking…</span>
-      <span id="gmailDetail" class="helper"></span>
-    </div>
-    <div class="system-item">
-      <strong>Google Chat</strong>
-      <span id="chatState" class="pill neutral">Checking…</span>
-      <span id="chatDetail" class="helper"></span>
-    </div>
-    <div class="system-item">
-      <strong>OpenAI</strong>
-      <span id="aiState" class="pill neutral">Checking…</span>
-      <span id="aiDetail" class="helper"></span>
-    </div>
-    <div class="system-actions full-system-actions">
-      <label class="checkline"><input id="autoAdd" type="checkbox"> Auto-add AI detections</label><label class="checkline"><input id="autoInvoices" type="checkbox"> Auto-add incoming invoices to Finances</label>
-      <a id="connectGoogle" href="/gmail/connect" class="button primary hidden">Connect Google</a>
-      <button id="syncAll" class="button secondary hidden">Sync Mail + Sent + Chat</button>
-      <button id="checkChat" class="button secondary">Check Chat</button>
-    </div>
-  </section>
 
   <nav class="tabs" aria-label="Dashboard sections">
     <button class="tab active" data-tab="client">Client Tasks <span id="tabClientCount">0</span></button>
@@ -180,6 +155,26 @@
   </div>
 </dialog>
 
+
+<dialog id="settingsDialog">
+  <div class="dialog-box">
+    <div class="dialog-head">
+      <div><h2>Settings</h2><p class="helper">Routine automation stays enabled by default so the dashboard can remain compact.</p></div>
+      <button class="icon-button" data-close-dialog="settingsDialog">×</button>
+    </div>
+    <div class="settings-list">
+      <div class="setting-row"><span>Auto-add AI task detections</span><span class="pill ok">Always On</span></div>
+      <div class="setting-row"><span>Auto-add incoming invoices to Finances</span><span class="pill ok">Always On</span></div>
+      <div class="setting-row"><span>Ignore Gmail source</span><strong>xwf.google.com</strong></div>
+      <div class="setting-row"><span>Ignore Google Chat space</span><strong>Sales Team to Me</strong></div>
+    </div>
+    <div class="row">
+      <button id="watchDomainsBtn" class="button secondary">Watch Domains</button>
+      <button id="themeToggle" class="button secondary">Dark Mode</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="watchDomainsDialog">
   <div class="dialog-box">
     <div class="dialog-head"><div><h2>Highly Watched Domains</h2><p class="helper">Mail from these domains gets an additional scan and actionable items receive at least High priority.</p></div><button class="icon-button" data-close-dialog="watchDomainsDialog">×</button></div>
@@ -211,19 +206,41 @@
 </dialog>
 
 
-<dialog id="chatDiagnosticsDialog">
+<dialog id="diagnosticsDialog">
   <div class="dialog-box wide-dialog">
     <div class="dialog-head">
-      <h2>Google Chat Diagnostics</h2>
-      <button class="icon-button" data-close-dialog="chatDiagnosticsDialog">×</button>
+      <div><h2>Diagnostics</h2><p class="helper">Connection details and troubleshooting live here instead of on the main dashboard.</p></div>
+      <button class="icon-button" data-close-dialog="diagnosticsDialog">×</button>
     </div>
+
+    <div class="diagnostic-system-list">
+      <div class="diagnostic-system-row">
+        <strong>Gmail + Sent</strong>
+        <span id="gmailState" class="pill neutral">Checking…</span>
+        <span id="gmailDetail" class="helper"></span>
+      </div>
+      <div class="diagnostic-system-row">
+        <strong>Google Chat</strong>
+        <span id="chatState" class="pill neutral">Checking…</span>
+        <span id="chatDetail" class="helper"></span>
+      </div>
+      <div class="diagnostic-system-row">
+        <strong>AI Analyzer</strong>
+        <span id="aiSimpleState" class="pill neutral">Checking…</span>
+        <span id="aiSimpleDetail" class="helper"></span>
+      </div>
+    </div>
+
+    <div class="row diagnostic-actions">
+      <a id="connectGoogle" href="/gmail/connect" class="button primary hidden">Connect Google</a>
+      <button id="checkChat" class="button secondary">Check Chat</button>
+    </div>
+
     <div id="chatDiagnosticsBody" class="diagnostics-body">
-      <div class="helper">This check talks directly to Google Chat and does not use OpenAI.</div>
+      <div class="helper">Click Check Chat to test Google Chat directly without using OpenAI.</div>
     </div>
-    <div class="row">
-      <button id="runChatDiagnostics" class="button primary">Run Chat Check</button>
-      <button class="button secondary" data-close-dialog="chatDiagnosticsDialog">Close</button>
-    </div>
+
+    <div class="row"><button class="button secondary" data-close-dialog="diagnosticsDialog">Close</button></div>
   </div>
 </dialog>
 

@@ -147,3 +147,25 @@ After deploy:
 4. Review any exact API errors shown.
 5. Run **Sync Mail + Sent + Chat**.
 6. Watch Render memory for several sync cycles.
+## Compact Header + Background Sync release
+
+Replace:
+```text
+app.py
+templates/index.html
+static/app.js
+static/style.css
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Keep `render.yaml` and `.python-version` from the previous memory-optimized release.
+Do not delete `/var/data/tasks.db`.
+
+After deploy:
+1. Header should be one compact row.
+2. Sync should immediately say it is running in the background instead of holding the request open.
+3. Diagnostics contains Gmail/Chat/AI connection information.
+4. Settings contains Watch Domains and Dark/Light mode.
+5. `Sales Team to Me` should disappear from active Chat review/tasks.
+6. Gmail/Chat live tasks should show **Not a Task — Train Type**.

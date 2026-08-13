@@ -104,3 +104,48 @@ dialog{border:none;border-radius:16px;padding:0;width:min(720px,calc(100% - 30px
 .diagnostic-table{width:100%;border-collapse:collapse;font-size:13px}
 .diagnostic-table th,.diagnostic-table td{padding:8px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
 @media(max-width:760px){.diagnostic-grid{grid-template-columns:1fr 1fr}}
+
+
+/* Compact main header */
+.compact-topbar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  padding-bottom:12px;
+}
+.compact-brand h1{margin:0;font-size:24px}
+.compact-header-actions{
+  display:flex !important;
+  flex-wrap:nowrap !important;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  white-space:nowrap;
+}
+.compact-header-actions .button{margin:0}
+.sync-status{
+  font-size:12px;
+  color:var(--muted);
+  max-width:260px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.settings-list,.diagnostic-system-list{display:grid;gap:8px;margin:10px 0 16px}
+.setting-row,.diagnostic-system-row{
+  display:grid;
+  grid-template-columns:minmax(180px,1fr) auto;
+  gap:10px;
+  align-items:center;
+  border:1px solid var(--border);
+  background:var(--card2);
+  border-radius:10px;
+  padding:10px 12px;
+}
+.diagnostic-system-row{grid-template-columns:150px auto minmax(200px,1fr)}
+.diagnostic-actions{margin:12px 0}
+@media(max-width:900px){
+  .compact-topbar{align-items:flex-start;flex-direction:column}
+  .compact-header-actions{width:100%;overflow-x:auto;justify-content:flex-start;padding-bottom:4px}
+  .sync-status{display:none}
+}

@@ -64,6 +64,14 @@ CHAT_SCAN_MAX_MESSAGES_PER_SPACE = max(20, int(os.environ.get("CHAT_SCAN_MAX_MES
 WATCH_DOMAIN_LOOKBACK_DAYS = max(30, int(os.environ.get("WATCH_DOMAIN_LOOKBACK_DAYS", "90") or "90"))
 AI_CONTEXT_CHAR_BUDGET = max(30000, int(os.environ.get("AI_CONTEXT_CHAR_BUDGET", "90000") or "90000"))
 SYNC_LOCK = threading.Lock()
+MANUAL_SYNC_STATE_LOCK = threading.Lock()
+MANUAL_SYNC_STATE = {
+    "running": False,
+    "started_at": "",
+    "finished_at": "",
+    "error": "",
+    "result": {},
+}
 
 # Google user authorization for Gmail plus read-only Google Chat.
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
@@ -501,11 +509,53 @@ def init_db():
         }.items():
             con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
 
+        # Keep these automations permanently enabled; they no longer need main-page switches.
+        con.execute(
+            "INSERT INTO settings(key,value) VALUES('gmail_auto_add','1') "
+            "ON CONFLICT(key) DO UPDATE SET value='1'"
+        )
+        con.execute(
+            "INSERT INTO settings(key,value) VALUES('auto_add_invoices','1') "
+            "ON CONFLICT(key) DO UPDATE SET value='1'"
+        )
+
         # Explicit user training: xwf.google.com is never a task source.
         con.execute(
             """
             INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
             VALUES('gmail','domain','xwf.google.com','Explicitly marked by user as not a task source',1)
+            """
+        )
+
+        con.execute(
+            """
+            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
+            VALUES('chat','space','sales team to me','Explicitly removed by user',1)
+            """
+        )
+
+        con.execute(
+            """
+            UPDATE chat_suggestions
+            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
+            WHERE lower(trim(space_display_name))='sales team to me'
+              AND state='new'
+            """
+        )
+
+        con.execute(
+            """
+            INSERT INTO notes(task_id,body)
+            SELECT id,'Removed from open tasks because the Google Chat space "Sales Team to Me" is ignored.'
+            FROM tasks
+            WHERE completed=0 AND source_kind='chat' AND lower(trim(party))='sales team to me'
+            """
+        )
+        con.execute(
+            """
+            UPDATE tasks
+            SET completed=1,completed_at=CURRENT_TIMESTAMP,status='Completed',updated_at=CURRENT_TIMESTAMP
+            WHERE completed=0 AND source_kind='chat' AND lower(trim(party))='sales team to me'
             """
         )
         con.execute(
@@ -750,6 +800,23 @@ def ignored_source(source_type, sender_email="", domain=""):
             watched = normalize_domain(value)
             if domain == watched or domain.endswith("." + watched):
                 return True
+    return False
+
+
+def ignored_chat_space(space):
+    display_name = (space.get("displayName") or "").strip().lower()
+    resource_name = (space.get("name") or "").strip().lower()
+    with connect_db() as con:
+        rows = con.execute(
+            """
+            SELECT value FROM ignore_sources
+            WHERE source_type='chat' AND rule_type='space' AND enabled=1
+            """
+        ).fetchall()
+    for row in rows:
+        value = (row["value"] or "").strip().lower()
+        if value and (display_name == value or resource_name == value):
+            return True
     return False
 
 
@@ -2391,7 +2458,13 @@ def chat_diagnostics_report():
         # Deliberately use no filter in diagnostics. Google should return every
         # visible space type for the authenticated user.
         resp = service.spaces().list(pageSize=100).execute()
-        spaces = resp.get("spaces", [])
+        all_spaces = resp.get("spaces", [])
+        ignored_names = [
+            (s.get("displayName") or s.get("name") or "Unnamed")
+            for s in all_spaces if ignored_chat_space(s)
+        ]
+        spaces = [s for s in all_spaces if not ignored_chat_space(s)]
+        result["ignored_spaces"] = ignored_names
         result["space_count"] = len(spaces)
         for space in spaces:
             stype = space.get("spaceType", "UNKNOWN")
@@ -2613,7 +2686,11 @@ def sync_google_chat():
     spaces = chat_list_spaces(service)
     checked = analyzed = added = updates = 0
     space_errors = []
+    ignored_spaces = 0
     for space in spaces:
+        if ignored_chat_space(space):
+            ignored_spaces += 1
+            continue
         try:
             messages = chat_list_messages(service, space.get("name", ""))
         except Exception as exc:
@@ -2702,6 +2779,7 @@ def sync_google_chat():
         "analyzed": analyzed,
         "added": added,
         "updates": updates,
+        "ignored_spaces": ignored_spaces,
         "space_errors": space_errors[:10],
     }
 
@@ -2744,24 +2822,62 @@ def sync_all_communications():
         except Exception as exc:
             set_setting("gmail_last_error", str(exc))
             result["gmail"] = {"error": str(exc)}
+        finally:
+            gc.collect()
+
         try:
             result["meetings"] = sync_meeting_recaps()
         except Exception as exc:
             set_setting("meeting_last_error", str(exc))
             result["meetings"] = {"error": str(exc)}
+        finally:
+            gc.collect()
+
         try:
             result["sent"] = sync_sent_mail()
         except Exception as exc:
             set_setting("sent_last_error", str(exc))
             result["sent"] = {"error": str(exc)}
+        finally:
+            gc.collect()
+
         try:
             result["chat"] = sync_google_chat()
         except Exception as exc:
             set_setting("chat_last_error", str(exc))
             result["chat"] = {"error": str(exc)}
+        finally:
+            gc.collect()
+
         return result
     finally:
         SYNC_LOCK.release()
+
+def manual_sync_worker():
+    with MANUAL_SYNC_STATE_LOCK:
+        MANUAL_SYNC_STATE.update({
+            "running": True,
+            "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "finished_at": "",
+            "error": "",
+            "result": {},
+        })
+    try:
+        result = sync_all_communications()
+        with MANUAL_SYNC_STATE_LOCK:
+            MANUAL_SYNC_STATE["result"] = result
+            if result.get("busy"):
+                MANUAL_SYNC_STATE["error"] = "A background sync was already running."
+    except Exception as exc:
+        app.logger.exception("Manual communications sync failed")
+        with MANUAL_SYNC_STATE_LOCK:
+            MANUAL_SYNC_STATE["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        with MANUAL_SYNC_STATE_LOCK:
+            MANUAL_SYNC_STATE["running"] = False
+            MANUAL_SYNC_STATE["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        gc.collect()
+
 
 # ---------------- Background sync ----------------
 
@@ -3117,10 +3233,34 @@ def gmail_sync_endpoint():
 @app.post("/api/communications/sync")
 @login_required
 def communications_sync_endpoint():
-    result = sync_all_communications()
-    if result.get("busy"):
-        return jsonify({"busy": True, "message": "A communications sync is already running."}), 202
-    return jsonify(result)
+    with MANUAL_SYNC_STATE_LOCK:
+        if MANUAL_SYNC_STATE["running"]:
+            return jsonify({
+                "busy": True,
+                "running": True,
+                "message": "A manual communications sync is already running.",
+            }), 202
+
+    if SYNC_LOCK.locked():
+        return jsonify({
+            "busy": True,
+            "running": False,
+            "message": "The scheduled background sync is already running.",
+        }), 202
+
+    threading.Thread(target=manual_sync_worker, daemon=True).start()
+    return jsonify({
+        "started": True,
+        "running": True,
+        "message": "Sync started in the background.",
+    }), 202
+
+
+@app.get("/api/communications/sync/status")
+@login_required
+def communications_sync_status():
+    with MANUAL_SYNC_STATE_LOCK:
+        return jsonify(dict(MANUAL_SYNC_STATE))
 
 
 @app.post("/api/chat/sync")
@@ -3723,6 +3863,45 @@ def invoice_register():
         return jsonify([serialize_task(r, con) for r in rows])
 
 
+
+@app.get("/api/dashboard/counts")
+@login_required
+def dashboard_counts():
+    with connect_db() as con:
+        return jsonify({
+            "client": con.execute(
+                "SELECT COUNT(*) FROM tasks WHERE completed=0 AND category='client'"
+            ).fetchone()[0],
+            "payment": con.execute(
+                "SELECT COUNT(*) FROM tasks WHERE completed=0 AND category='payment'"
+            ).fetchone()[0],
+            "invoice": con.execute(
+                """
+                SELECT COUNT(*) FROM tasks
+                WHERE category='payment' AND (invoice_sent=1 OR COALESCE(invoice_number,'')<>'')
+                """
+            ).fetchone()[0],
+            "sent": con.execute(
+                "SELECT COUNT(*) FROM sent_monitors WHERE state='monitoring'"
+            ).fetchone()[0],
+            "gmail": con.execute(
+                "SELECT COUNT(*) FROM gmail_suggestions WHERE state='new'"
+            ).fetchone()[0],
+            "chat": con.execute(
+                """
+                SELECT COUNT(*) FROM chat_suggestions
+                WHERE state='new' AND lower(trim(space_display_name))<>'sales team to me'
+                """
+            ).fetchone()[0],
+            "meetings": con.execute(
+                "SELECT COUNT(*) FROM meeting_reviews WHERE state='new'"
+            ).fetchone()[0],
+            "completed": con.execute(
+                "SELECT COUNT(*) FROM tasks WHERE completed=1"
+            ).fetchone()[0],
+        })
+
+
 @app.get("/api/payment-summary")
 @login_required
 def payment_summary():
@@ -3950,6 +4129,78 @@ def mark_task_paid(task_id):
             summary += f"; {note}"
         con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)", (task_id, summary))
     return jsonify({"ok": True, "paid_at": stamp})
+
+
+
+@app.post("/api/tasks/<int:task_id>/not-task")
+@login_required
+def train_live_task_not_task(task_id):
+    with connect_db() as con:
+        task = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+        if task["source_kind"] not in {"gmail", "chat"}:
+            return jsonify({"error": "Only Gmail- or Chat-created tasks can train this rule."}), 400
+
+        if task["source_kind"] == "gmail":
+            source = con.execute(
+                "SELECT * FROM gmail_suggestions WHERE gmail_message_id=? ORDER BY id DESC LIMIT 1",
+                (task["gmail_message_id"],)
+            ).fetchone()
+            sender_name = source["sender_name"] if source else task["party"]
+            sender_email = source["sender_email"] if source else task["email_to"]
+            subject = source["subject"] if source else task["email_subject"]
+            excerpt = (source["snippet"] if source else task["detail"]) or task["detail"]
+            source_id = task["gmail_message_id"]
+        else:
+            source = con.execute(
+                "SELECT * FROM chat_suggestions WHERE message_name=? ORDER BY id DESC LIMIT 1",
+                (task["chat_message_name"],)
+            ).fetchone()
+            sender_name = source["sender_display_name"] if source else task["party"]
+            sender_email = ""
+            subject = (source["suggested_title"] if source else task["title"]) or task["title"]
+            excerpt = (source["message_text"] if source else task["detail"]) or task["detail"]
+            source_id = task["chat_message_name"]
+
+    store_not_task_training(
+        task["source_kind"],
+        source_id=source_id or "",
+        sender_name=sender_name or "",
+        sender_email=sender_email or "",
+        subject=subject or task["title"],
+        excerpt=excerpt or task["detail"],
+        reason="User marked an approved/live task as Not a Task and trained this type.",
+    )
+
+    with connect_db() as con:
+        con.execute(
+            """
+            UPDATE tasks
+            SET completed=1,completed_at=CURRENT_TIMESTAMP,status='Completed',updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (task_id,)
+        )
+        con.execute(
+            """
+            INSERT INTO notes(task_id,body)
+            VALUES(?, 'Removed from open tasks and saved as NOT A TASK training for similar future communications.')
+            """,
+            (task_id,)
+        )
+        if task["source_kind"] == "gmail" and task["gmail_message_id"]:
+            con.execute(
+                "UPDATE gmail_suggestions SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP WHERE gmail_message_id=?",
+                (task["gmail_message_id"],)
+            )
+        if task["source_kind"] == "chat" and task["chat_message_name"]:
+            con.execute(
+                "UPDATE chat_suggestions SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP WHERE message_name=?",
+                (task["chat_message_name"],)
+            )
+
+    return jsonify({"ok": True, "trained": True})
 
 
 @app.post("/api/tasks/<int:task_id>/complete")

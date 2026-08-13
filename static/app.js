@@ -1,7 +1,7 @@
 const state={
   tab:"client", client:[], payment:[], invoice:[], history:[], gmailSuggestions:[], chatSuggestions:[],
   sentFollowups:[], meetingReviews:[], summary:{}, system:null, currentReply:null,currentChatReply:null, quickFilter:"", sentQuick:"all",
-  discoveryTasks:[], watchDomains:[], sortBy:"due"
+  discoveryTasks:[], watchDomains:[], sortBy:"due", counts:{}, syncPoll:null
 };
 const el=id=>document.getElementById(id);
 const TODAY=new Date().toISOString().slice(0,10);
@@ -89,6 +89,7 @@ function actionButtons(t,history=false){
     ${t.email_url?`<a class="task-action" href="${esc(t.email_url)}" target="_blank" rel="noopener">See Email</a>`:""}
     ${t.chat_space_uri?`<a class="task-action" href="${esc(t.chat_space_uri)}" target="_blank" rel="noopener">See Chat</a>`:""}
     ${t.chat_space_name?`<button class="task-action" data-chat-reply="${t.id}">Reply in Chat</button>`:""}
+    ${["gmail","chat"].includes(t.source_kind)?`<button class="task-action not-task-button" data-live-not-task="${t.id}">Not a Task — Train Type</button>`:""}
     <button class="task-action" data-reply="${t.id}">Prepare Reply</button>
     <button class="task-action complete" ${t.category==="payment"?`data-mark-paid="${t.id}"`:`data-complete="${t.id}"`}>${t.category==="payment"?"Mark Paid":"Complete"}</button>
   </div>`;
@@ -145,7 +146,7 @@ function filtered(rows){
   }));
 }
 function renderMetrics(){
-  el("tabClientCount").textContent=state.client.length;el("tabPaymentCount").textContent=state.payment.length;el("tabInvoiceCount").textContent=state.invoice.length;el("tabSentCount").textContent=state.sentFollowups.length;el("tabGmailCount").textContent=state.gmailSuggestions.length;el("tabChatCount").textContent=state.chatSuggestions.length;el("tabMeetingCount").textContent=state.meetingReviews.length;el("tabCompletedCount").textContent=state.history.length;
+  const c=state.counts||{};el("tabClientCount").textContent=c.client??state.client.length;el("tabPaymentCount").textContent=c.payment??state.payment.length;el("tabInvoiceCount").textContent=c.invoice??state.invoice.length;el("tabSentCount").textContent=c.sent??state.sentFollowups.length;el("tabGmailCount").textContent=c.gmail??state.gmailSuggestions.length;el("tabChatCount").textContent=c.chat??state.chatSuggestions.length;el("tabMeetingCount").textContent=c.meetings??state.meetingReviews.length;el("tabCompletedCount").textContent=c.completed??state.history.length;
   el("clientCount").textContent=state.client.length;el("clientUrgent").textContent=state.client.filter(t=>t.priority==="urgent").length;el("clientDue").textContent=state.client.filter(t=>t.due_date&&t.due_date<=TODAY).length;el("clientWaiting").textContent=state.client.filter(t=>t.status==="Waiting").length;
   const s=state.summary||{};el("payCount").textContent=s.count_all||0;el("payTotal").textContent=money(s.total_known||0);el("payOverdue").textContent=s.overdue_count||0;el("payOverdueTotal").textContent=money(s.overdue_total||0);
   el("invoiceCount").textContent=s.invoice_register_count||state.invoice.length;el("invoiceTotal").textContent=s.invoice_unpaid_count||state.invoice.filter(t=>!t.completed).length;el("invoiceOverdue").textContent=state.invoice.filter(t=>!t.completed&&t.due_date&&t.due_date<TODAY).length;el("invoiceNoAmount").textContent=s.invoice_paid_count||state.invoice.filter(t=>t.completed).length;
@@ -193,11 +194,37 @@ function updateViews(){
 }
 async function loadSystem(){
   state.system=await api("/api/system/status");const s=state.system;
-  el("gmailState").textContent=s.gmail_connected?"Connected":s.google_configured?"Not connected":"Needs setup";el("gmailState").className=`pill ${s.gmail_connected?"ok":"neutral"}`;
-  const mailBits=[];if(s.gmail_last_sync)mailBits.push(`Inbox ${safeDate(s.gmail_last_sync)}`);if(s.sent_last_sync)mailBits.push(`Sent ${safeDate(s.sent_last_sync)}`);if(s.meeting_last_sync)mailBits.push(`Meetings ${safeDate(s.meeting_last_sync)}`);if(s.gmail_last_error)mailBits.push(`Error: ${s.gmail_last_error}`);el("gmailDetail").textContent=mailBits.join(" · ");
-  el("chatState").textContent=s.chat_connected?"Read Connected":s.google_scope_upgrade_needed?"Reconnect Google":"Not connected";el("chatState").className=`pill ${s.chat_connected?"ok":s.google_scope_upgrade_needed?"bad":"neutral"}`;const chatBits=[];if(s.chat_connected)chatBits.push(s.chat_last_sync?`Last sync ${safeDate(s.chat_last_sync)}`:"Ready to sync");if(s.chat_connected)chatBits.push(s.chat_send_enabled?"Replies enabled":"Read only — reconnect for replies");if(s.chat_last_error)chatBits.push(`Error: ${s.chat_last_error}`);if(!s.chat_connected&&s.google_scope_upgrade_needed)chatBits.push("Reconnect once to grant the Google Chat read scopes.");el("chatDetail").textContent=chatBits.join(" · ");
-  el("aiState").textContent=s.openai_configured?"AI Analyzer On":"Fallback Only";el("aiState").className=`pill ${s.openai_configured?"ok":"neutral"}`;el("aiDetail").textContent=s.openai_configured?`Model: ${s.openai_model}${s.openai_last_error?" · Last error: "+s.openai_last_error:""}`:"Add OPENAI_API_KEY in Render.";
-  const showConnect=!s.gmail_connected||s.google_scope_upgrade_needed;el("connectGoogle").classList.toggle("hidden",!showConnect||!s.google_configured);el("connectGoogle").textContent=s.google_scope_upgrade_needed?"Reconnect Google for Chat":"Connect Google";el("syncAll").classList.toggle("hidden",!s.gmail_connected);el("autoAdd").checked=!!s.gmail_auto_add;el("autoInvoices").checked=s.auto_add_invoices!==false;el("autoAdd").disabled=!s.gmail_connected;
+
+  el("gmailState").textContent=s.gmail_connected?"Connected":s.google_configured?"Not connected":"Needs setup";
+  el("gmailState").className=`pill ${s.gmail_connected?"ok":"neutral"}`;
+  const mailBits=[];
+  if(s.gmail_last_sync)mailBits.push(`Inbox ${safeDate(s.gmail_last_sync)}`);
+  if(s.sent_last_sync)mailBits.push(`Sent ${safeDate(s.sent_last_sync)}`);
+  if(s.meeting_last_sync)mailBits.push(`Meetings ${safeDate(s.meeting_last_sync)}`);
+  if(s.gmail_last_error)mailBits.push(`Error: ${s.gmail_last_error}`);
+  el("gmailDetail").textContent=mailBits.join(" · ");
+
+  el("chatState").textContent=s.chat_connected?"Read Connected":s.google_scope_upgrade_needed?"Reconnect Google":"Not connected";
+  el("chatState").className=`pill ${s.chat_connected?"ok":s.google_scope_upgrade_needed?"bad":"neutral"}`;
+  const chatBits=[];
+  if(s.chat_connected)chatBits.push(s.chat_last_sync?`Last sync ${safeDate(s.chat_last_sync)}`:"Ready to sync");
+  if(s.chat_connected)chatBits.push(s.chat_send_enabled?"Replies enabled":"Read only");
+  if(s.chat_last_error)chatBits.push(`Error: ${s.chat_last_error}`);
+  el("chatDetail").textContent=chatBits.join(" · ");
+
+  el("aiSimpleState").textContent=s.openai_configured?"Configured":"Not configured";
+  el("aiSimpleState").className=`pill ${s.openai_configured?"ok":"neutral"}`;
+  el("aiSimpleDetail").textContent=s.openai_last_error?`Last error: ${s.openai_last_error}`:"";
+
+  const showConnect=!s.gmail_connected||s.google_scope_upgrade_needed;
+  el("connectGoogle").classList.toggle("hidden",!showConnect||!s.google_configured);
+  el("connectGoogle").textContent=s.google_scope_upgrade_needed?"Reconnect Google":"Connect Google";
+  el("syncAll").classList.toggle("hidden",!s.gmail_connected);
+
+  if(!state.syncPoll){
+    const latest=s.gmail_last_sync||s.chat_last_sync||s.sent_last_sync||"";
+    el("syncStatus").textContent=latest?`Last sync ${safeDate(latest)}`:(s.gmail_connected?"Ready":"Connect Google");
+  }
 }
 
 function diagnosticSpaceRow(s){
@@ -213,7 +240,7 @@ function renderChatDiagnostics(d){
       <div class="diagnostic-card"><span>Spaces Google Returned</span><strong>${Number(d.space_count||0)}</strong></div>
       <div class="diagnostic-card"><span>Recent Sample Messages</span><strong>${Number(d.recent_message_samples||0)}</strong></div>
     </div>
-    <div class="callout"><strong>Space types:</strong> ${types}<br><strong>Lookback:</strong> ${Number(d.lookback_days||30)} days. No OpenAI call is made by this diagnostic.</div>
+    <div class="callout"><strong>Space types:</strong> ${types}<br><strong>Lookback:</strong> ${Number(d.lookback_days||30)} days. No OpenAI call is made by this diagnostic.${(d.ignored_spaces||[]).length?`<br><strong>Ignored spaces:</strong> ${esc((d.ignored_spaces||[]).join(", "))}`:""}</div>
     ${errors.length?`<div class="diagnostic-errors"><strong>Errors</strong>${errors.map(x=>`<div>${esc(x)}</div>`).join("")}</div>`:""}
     <div class="table-wrap"><table class="diagnostic-table"><thead><tr><th>Space</th><th>Type</th><th>Recent sample</th><th>Error</th></tr></thead><tbody>${(d.sampled_spaces||[]).map(diagnosticSpaceRow).join("")}</tbody></table></div>`;
 }
@@ -232,18 +259,32 @@ async function runChatDiagnostics(){
   }
 }
 
+function clearInactiveTabData(active){
+  if(active!=="client")state.client=[];
+  if(active!=="payment")state.payment=[];
+  if(active!=="invoice")state.invoice=[];
+  if(active!=="completed")state.history=[];
+  if(active!=="gmail")state.gmailSuggestions=[];
+  if(active!=="chat")state.chatSuggestions=[];
+  if(active!=="sent")state.sentFollowups=[];
+  if(active!=="meetings")state.meetingReviews=[];
+}
+async function loadCounts(){state.counts=await api("/api/dashboard/counts")}
+async function loadTabData(tab){
+  clearInactiveTabData(tab);
+  if(tab==="client")state.client=await api("/api/tasks?category=client");
+  if(tab==="payment"){state.summary=await api("/api/payment-summary");state.payment=await api("/api/tasks?category=payment")}
+  if(tab==="invoice"){state.summary=await api("/api/payment-summary");state.invoice=await api("/api/invoices")}
+  if(tab==="completed")state.history=await api("/api/tasks?completed=1");
+  if(tab==="gmail")state.gmailSuggestions=await api("/api/gmail/suggestions");
+  if(tab==="chat")state.chatSuggestions=await api("/api/chat/suggestions");
+  if(tab==="sent")state.sentFollowups=await api("/api/sent-followups");
+  if(tab==="meetings")state.meetingReviews=await api("/api/meetings/reviews");
+}
 async function load(){
-  // Load in stages instead of issuing nine memory-heavy requests at once.
   await loadSystem();
-  state.summary=await api("/api/payment-summary");
-  state.client=await api("/api/tasks?category=client");
-  state.payment=await api("/api/tasks?category=payment");
-  state.invoice=await api("/api/invoices");
-  state.history=await api("/api/tasks?completed=1");
-  state.gmailSuggestions=await api("/api/gmail/suggestions");
-  state.chatSuggestions=await api("/api/chat/suggestions");
-  state.sentFollowups=await api("/api/sent-followups");
-  state.meetingReviews=await api("/api/meetings/reviews");
+  await loadCounts();
+  await loadTabData(state.tab);
   renderMetrics();renderGmailSuggestions();renderChatSuggestions();renderMeetings();renderSent();updateViews();
 }
 function showPanel(id,html){const box=el(`reveal-${id}`);box.innerHTML=html;box.className="reveal"}
@@ -254,14 +295,14 @@ function applyTheme(theme){document.body.dataset.theme=theme;localStorage.setIte
 applyTheme(preferredTheme());el("themeToggle").addEventListener("click",()=>applyTheme(document.body.dataset.theme==="dark"?"light":"dark"));
 
 // Tabs and scorecards.
-document.querySelector(".tabs").addEventListener("click",e=>{const b=e.target.closest("[data-tab]");if(!b)return;state.tab=b.dataset.tab;state.quickFilter="";updateViews()});
+document.querySelector(".tabs").addEventListener("click",async e=>{const b=e.target.closest("[data-tab]");if(!b)return;state.tab=b.dataset.tab;state.quickFilter="";await loadTabData(state.tab);await loadCounts();renderMetrics();updateViews()});
 document.addEventListener("click",e=>{const m=e.target.closest(".metric[data-quick]");if(!m)return;state.quickFilter=m.dataset.quick;renderTasks();const first=el("taskList").querySelector(".task");if(first)first.scrollIntoView({behavior:"smooth",block:"start"})});
 document.addEventListener("click",e=>{const m=e.target.closest(".metric[data-sent-quick]");if(!m)return;state.sentQuick=m.dataset.sentQuick;renderSent()});
 el("clearQuickFilter").addEventListener("click",()=>{state.quickFilter="";renderTasks()});
 
 // Task actions.
 el("taskList").addEventListener("click",async e=>{
-  const b=e.target.closest("[data-status],[data-note],[data-deadline],[data-email-research],[data-check-resolution],[data-gpt-help],[data-show-gpt-prompt],[data-suppress-gpt-help],[data-payment-edit],[data-invoice-toggle],[data-reply],[data-chat-reply],[data-mark-paid],[data-complete],[data-restore],[data-delete],[data-resolution-yes],[data-resolution-no]");if(!b)return;
+  const b=e.target.closest("[data-status],[data-note],[data-deadline],[data-email-research],[data-check-resolution],[data-gpt-help],[data-show-gpt-prompt],[data-suppress-gpt-help],[data-payment-edit],[data-invoice-toggle],[data-reply],[data-chat-reply],[data-live-not-task],[data-mark-paid],[data-complete],[data-restore],[data-delete],[data-resolution-yes],[data-resolution-no]");if(!b)return;
   const key=Object.keys(b.dataset)[0],id=Number(b.dataset[key]),t=getTask(id);if(!t)return;
   if(key==="status")showPanel(id,`<label>Status<select id="statusInput-${id}">${["Open","Working","Waiting","Blocked"].map(s=>`<option ${s===t.status?"selected":""}>${s}</option>`).join("")}</select></label><div class="row"><button class="button primary" data-save-status="${id}">Save Status</button></div>`);
   if(key==="note")showPanel(id,`<label>Create Note<textarea id="noteInput-${id}" rows="3" placeholder="Add update, owner, promise, payment confirmation or next step..."></textarea></label><div class="row"><button class="button primary" data-save-note="${id}">Save Note</button></div>`);
@@ -306,6 +347,12 @@ el("taskList").addEventListener("click",async e=>{
       <label class="span2">Payment Note<textarea id="paidNote-${id}" rows="2" placeholder="Optional payment details"></textarea></label>
     </div><div class="row"><button class="button primary" data-confirm-paid="${id}">Confirm Paid</button></div>`);
   }
+  if(key==="liveNotTask"){
+    if(confirm("Remove this from your open tasks and train the AI not to create similar tasks in the future?")){
+      await api(`/api/tasks/${id}/not-task`,{method:"POST"});
+      await load();
+    }
+  }
   if(key==="complete"){await api(`/api/tasks/${id}/complete`,{method:"POST"});await load()}
   if(key==="restore"){await api(`/api/tasks/${id}/restore`,{method:"POST"});await load()}
   if(key==="delete"&&confirm("Permanently delete this item?")){await api(`/api/tasks/${id}`,{method:"DELETE"});await load()}
@@ -339,11 +386,59 @@ el("sentList").addEventListener("click",async e=>{const create=e.target.closest(
 el("meetingList").addEventListener("click",async e=>{const add=e.target.closest("[data-meeting-add]"),dismiss=e.target.closest("[data-meeting-dismiss]");if(add){const id=Number(add.dataset.meetingAdd),selected=[...document.querySelectorAll(`[data-meeting-task="${id}"]:checked`)].map(cb=>{const index=Number(cb.dataset.taskIndex),input=document.querySelector(`[data-meeting-assignee="${id}"][data-task-index="${index}"]`);return{index,assignee:input?.value.trim()||""}});if(!selected.length)return;const status=el(`meeting-status-${id}`);add.disabled=true;status.textContent="Adding selected meeting tasks…";try{const r=await api(`/api/meetings/reviews/${id}/add`,{method:"POST",body:JSON.stringify({tasks:selected})});status.textContent=`Added ${r.added} task(s).`;await load();state.tab="client";updateViews()}catch(err){status.textContent=err.message}finally{add.disabled=false}}if(dismiss){await api(`/api/meetings/reviews/${dismiss.dataset.meetingDismiss}/dismiss`,{method:"POST"});await load()}});
 
 // Full communications sync.
-el("checkChat").addEventListener("click",()=>{el("chatDiagnosticsDialog").showModal();runChatDiagnostics()});
-el("runChatDiagnostics").addEventListener("click",runChatDiagnostics);
-el("syncAll").addEventListener("click",async()=>{el("syncAll").disabled=true;el("syncAll").textContent="Syncing…";try{const r=await api("/api/communications/sync",{method:"POST"});await load();if(r.busy){el("gmailDetail").textContent="A communications sync is already running."}else{const g=r.gmail||{},s=r.sent||{},c=r.chat||{},m=r.meetings||{};el("gmailDetail").textContent=`Inbox: ${g.added||0} new task candidate(s), ${g.updates||0} task update(s). Sent: ${s.new_monitors||0} follow-up(s), ${s.resolution_reviews||0} possible resolution(s). Chat: ${c.added||0} candidate(s), ${c.updates||0} task update(s). Meeting recaps: ${m.added||0} new review(s).`}}catch(err){el("gmailDetail").textContent=`Sync failed: ${err.message}`}finally{el("syncAll").disabled=false;el("syncAll").textContent="Sync Mail + Sent + Chat"}});
-el("autoAdd").addEventListener("change",async()=>{await api("/api/settings",{method:"PATCH",body:JSON.stringify({gmail_auto_add:el("autoAdd").checked})});await loadSystem()});
-el("autoInvoices").addEventListener("change",async()=>{await api("/api/settings",{method:"PATCH",body:JSON.stringify({auto_add_invoices:el("autoInvoices").checked})});await loadSystem()});
+el("settingsBtn").addEventListener("click",()=>el("settingsDialog").showModal());
+el("diagnosticsBtn").addEventListener("click",async()=>{await loadSystem();el("diagnosticsDialog").showModal()});
+el("checkChat").addEventListener("click",runChatDiagnostics);
+async function pollManualSync(){
+  try{
+    const s=await api("/api/communications/sync/status");
+    if(s.running){
+      el("syncAll").disabled=true;
+      el("syncAll").textContent="Syncing…";
+      el("syncStatus").textContent="Sync running in background…";
+      state.syncPoll=setTimeout(pollManualSync,2500);
+      return;
+    }
+    state.syncPoll=null;
+    el("syncAll").disabled=false;
+    el("syncAll").textContent="Sync";
+    if(s.error){
+      el("syncStatus").textContent=`Sync issue: ${s.error}`;
+    }else if(s.finished_at){
+      const r=s.result||{},g=r.gmail||{},sent=r.sent||{},chat=r.chat||{};
+      el("syncStatus").textContent=`Synced ${safeDate(s.finished_at)} · ${g.added||0} mail · ${chat.added||0} chat · ${sent.new_monitors||0} follow-up`;
+    }else{
+      el("syncStatus").textContent="Ready";
+    }
+    await load();
+  }catch(err){
+    state.syncPoll=null;
+    el("syncAll").disabled=false;
+    el("syncAll").textContent="Sync";
+    el("syncStatus").textContent=`Sync status error: ${err.message}`;
+  }
+}
+
+el("syncAll").addEventListener("click",async()=>{
+  el("syncAll").disabled=true;
+  el("syncAll").textContent="Starting…";
+  el("syncStatus").textContent="Starting sync…";
+  try{
+    const r=await api("/api/communications/sync",{method:"POST"});
+    if(r.busy&&!r.running){
+      el("syncStatus").textContent=r.message||"Scheduled sync is already running.";
+      el("syncAll").disabled=false;
+      el("syncAll").textContent="Sync";
+      return;
+    }
+    if(state.syncPoll)clearTimeout(state.syncPoll);
+    state.syncPoll=setTimeout(pollManualSync,800);
+  }catch(err){
+    el("syncAll").disabled=false;
+    el("syncAll").textContent="Sync";
+    el("syncStatus").textContent=`Could not start sync: ${err.message}`;
+  }
+});
 
 // Reply dialog.
 function updateCompose(){const to=encodeURIComponent(el("replyTo").value),su=encodeURIComponent(el("replySubject").value),body=encodeURIComponent(el("replyBody").value);el("openGmailCompose").href=`https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${su}&body=${body}`}
@@ -366,7 +461,7 @@ el("voiceInputBtn").addEventListener("click",()=>{const SpeechRecognition=window
 // Highly watched domains.
 async function loadWatchDomains(){state.watchDomains=await api("/api/watch-domains");renderWatchDomains()}
 function renderWatchDomains(){el("watchDomainList").innerHTML=state.watchDomains.length?state.watchDomains.map(d=>`<div class="watch-item"><div><div class="domain">${esc(d.domain)} ${d.enabled?'<span class="pill ok">Watching</span>':'<span class="pill neutral">Paused</span>'}</div>${d.label?`<div class="label">${esc(d.label)}</div>`:""}</div><div class="row"><button class="button secondary" data-watch-toggle="${d.id}" data-enabled="${d.enabled?1:0}">${d.enabled?"Pause":"Resume"}</button><button class="button secondary danger" data-watch-delete="${d.id}">Remove</button></div></div>`).join(""):`<div class="panel">No domains are on high watch yet.</div>`}
-el("watchDomainsBtn").addEventListener("click",async()=>{el("watchDomainStatus").textContent="";await loadWatchDomains();el("watchDomainsDialog").showModal()});
+el("watchDomainsBtn").addEventListener("click",async()=>{el("settingsDialog").close();el("watchDomainStatus").textContent="";await loadWatchDomains();el("watchDomainsDialog").showModal()});
 el("addWatchDomain").addEventListener("click",async()=>{const domain=el("watchDomainInput").value.trim(),label=el("watchDomainLabel").value.trim();if(!domain)return;try{await api("/api/watch-domains",{method:"POST",body:JSON.stringify({domain,label})});el("watchDomainInput").value="";el("watchDomainLabel").value="";el("watchDomainStatus").textContent="Domain added to high watch.";await loadWatchDomains()}catch(err){el("watchDomainStatus").textContent=err.message}});
 el("watchDomainList").addEventListener("click",async e=>{const del=e.target.closest("[data-watch-delete]"),tog=e.target.closest("[data-watch-toggle]");if(del){await api(`/api/watch-domains/${del.dataset.watchDelete}`,{method:"DELETE"});await loadWatchDomains()}if(tog){const enabled=tog.dataset.enabled!=="1";await api(`/api/watch-domains/${tog.dataset.watchToggle}`,{method:"PATCH",body:JSON.stringify({enabled})});await loadWatchDomains()}});
 

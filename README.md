@@ -475,3 +475,54 @@ Recommended tuned defaults in `render.yaml`:
 - `AI_CONTEXT_CHAR_BUDGET=60000`
 
 The app remains on one Gunicorn worker because the background sync is in-process and should not be duplicated.
+## Compact header + background Sync
+
+The main header is reduced to one compact action row:
+
+```text
+Smart 1 Client Action Center | Ask Gmail | Sync | Settings | Diagnostics | Sign out
+```
+
+Technical status, Google connection details, Chat diagnostics, Watch Domains, theme,
+and automation defaults are moved into Settings/Diagnostics.
+
+### Sync no longer blocks the browser request
+
+The old Sync request waited for Gmail, meetings, Sent, and Chat to finish before returning.
+The new button starts a background thread, receives HTTP 202 immediately, polls sync status,
+and refreshes the active tab when the background work is done.
+
+## Automation defaults
+
+These are permanently on:
+- Auto-add AI task detections
+- Auto-add incoming invoices to Finances
+
+## Live task training
+
+Gmail- and Chat-created live tasks now show:
+
+```text
+Not a Task — Train Type
+```
+
+It removes the current item from the open list, preserves it in Completed/history,
+and teaches future classification that similar communications should not become tasks.
+
+## Removed Chat space
+
+`Sales Team to Me` is now permanently ignored:
+- new suggestions from that Chat space are removed
+- existing open tasks from that space move to Completed
+- future Chat syncs skip the space before AI analysis
+- diagnostics does not count the space as an active monitored Chat
+
+## Further memory reduction
+
+The browser now lazy-loads only the currently selected dashboard tab.
+Tab badges use a lightweight count endpoint, so Completed history, Invoice Register,
+Gmail Review, Chat Review, Sent Follow-ups, and Meeting Recaps are not all held in
+browser/server response memory on every refresh.
+
+The communications sync also runs garbage collection between Gmail, meeting, Sent,
+and Chat phases.
