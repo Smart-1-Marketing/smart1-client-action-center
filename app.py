@@ -252,6 +252,41 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS not_task_training (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT NOT NULL DEFAULT 'gmail',
+            source_id TEXT DEFAULT '',
+            sender_name TEXT DEFAULT '',
+            sender_email TEXT DEFAULT '',
+            sender_domain TEXT DEFAULT '',
+            subject TEXT DEFAULT '',
+            excerpt TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS ignore_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT NOT NULL DEFAULT 'gmail',
+            rule_type TEXT NOT NULL DEFAULT 'domain',
+            value TEXT NOT NULL,
+            note TEXT DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_type, rule_type, value)
+        );
+
+        CREATE TABLE IF NOT EXISTS gpt_help_suppressions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_domain TEXT DEFAULT '',
+            subject_pattern TEXT NOT NULL,
+            note TEXT DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(sender_domain, subject_pattern)
+        );
+
         CREATE TABLE IF NOT EXISTS task_participants (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER NOT NULL,
@@ -380,6 +415,7 @@ def init_db():
             "paid_amount REAL NOT NULL DEFAULT 0",
             "payment_reference TEXT DEFAULT ''",
             "payment_note TEXT DEFAULT ''",
+            "source_received_at TEXT DEFAULT ''",
         ]:
             ensure_column(con, "tasks", definition)
 
@@ -462,6 +498,58 @@ def init_db():
             "auto_add_invoices": "1",
         }.items():
             con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
+
+        # Explicit user training: xwf.google.com is never a task source.
+        con.execute(
+            """
+            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
+            VALUES('gmail','domain','xwf.google.com','Explicitly marked by user as not a task source',1)
+            """
+        )
+        con.execute(
+            """
+            UPDATE gmail_suggestions
+            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
+            WHERE lower(sender_email) LIKE '%@xwf.google.com'
+              AND state='new'
+            """
+        )
+
+        # Backfill "when this task came in" for older tasks.
+        # Prefer the original Gmail/Chat source timestamp; otherwise use task creation time.
+        con.execute(
+            """
+            UPDATE tasks
+            SET source_received_at = COALESCE(
+                NULLIF((
+                    SELECT gs.received_at
+                    FROM gmail_suggestions gs
+                    WHERE gs.gmail_message_id = tasks.gmail_message_id
+                    LIMIT 1
+                ), ''),
+                NULLIF((
+                    SELECT MIN(teu.received_at)
+                    FROM task_email_updates teu
+                    WHERE teu.task_id = tasks.id
+                      AND teu.received_at <> ''
+                ), ''),
+                NULLIF((
+                    SELECT cs.create_time
+                    FROM chat_suggestions cs
+                    WHERE cs.message_name = tasks.chat_message_name
+                    LIMIT 1
+                ), ''),
+                NULLIF((
+                    SELECT MIN(tcu.create_time)
+                    FROM task_chat_updates tcu
+                    WHERE tcu.task_id = tasks.id
+                      AND tcu.create_time <> ''
+                ), ''),
+                created_at
+            )
+            WHERE COALESCE(source_received_at, '') = ''
+            """
+        )
 
 
 init_db()
@@ -636,6 +724,137 @@ def watch_domains(enabled_only=True):
         else:
             rows = con.execute("SELECT * FROM watch_domains ORDER BY domain").fetchall()
         return [dict(r) for r in rows]
+
+
+def ignored_source(source_type, sender_email="", domain=""):
+    source_type = (source_type or "").strip().lower()
+    sender_email = (sender_email or "").strip().lower()
+    domain = normalize_domain(domain or sender_domain(sender_email))
+    with connect_db() as con:
+        rows = con.execute(
+            """
+            SELECT rule_type,value FROM ignore_sources
+            WHERE source_type=? AND enabled=1
+            """,
+            (source_type,)
+        ).fetchall()
+    for row in rows:
+        value = (row["value"] or "").strip().lower()
+        if row["rule_type"] == "email" and sender_email and sender_email == value:
+            return True
+        if row["rule_type"] == "domain" and domain:
+            watched = normalize_domain(value)
+            if domain == watched or domain.endswith("." + watched):
+                return True
+    return False
+
+
+def not_task_examples(source_type="gmail", limit=20):
+    with connect_db() as con:
+        rows = con.execute(
+            """
+            SELECT source_type,sender_name,sender_email,sender_domain,subject,excerpt,reason
+            FROM not_task_training
+            WHERE active=1 AND source_type=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (source_type, int(limit))
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def not_task_training_prompt(source_type="gmail", limit=20):
+    examples = not_task_examples(source_type, limit)
+    if not examples:
+        return "No user-trained NOT A TASK examples are available yet."
+    lines = [
+        "USER TRAINING — messages below were explicitly marked NOT A TASK.",
+        "Use them as negative examples. Similar automated/informational messages should normally be ignored.",
+        "Do not ignore a genuinely new, explicit request merely because it shares a broad company domain.",
+    ]
+    for item in examples:
+        sender = item.get("sender_email") or item.get("sender_name") or "unknown"
+        subject = (item.get("subject") or "").replace("\n", " ")[:160]
+        excerpt = (item.get("excerpt") or "").replace("\n", " ")[:220]
+        lines.append(
+            f"- Sender: {sender}; Domain: {item.get('sender_domain','')}; "
+            f"Subject: {subject}; Example: {excerpt}"
+        )
+    return "\n".join(lines)
+
+
+
+def normalized_subject_pattern(value):
+    value = re.sub(r"^\s*(re|fw|fwd)\s*:\s*", "", value or "", flags=re.I).lower()
+    value = re.sub(r"\b\d+\b", "#", value)
+    value = re.sub(r"[^a-z0-9#]+", " ", value)
+    return " ".join(value.split())[:160]
+
+
+def gpt_help_suppressed(sender_email="", subject=""):
+    domain = normalize_domain(sender_domain(sender_email or ""))
+    pattern = normalized_subject_pattern(subject)
+    if not pattern:
+        return False
+    with connect_db() as con:
+        rows = con.execute(
+            """
+            SELECT sender_domain,subject_pattern
+            FROM gpt_help_suppressions
+            WHERE enabled=1
+            """
+        ).fetchall()
+    for row in rows:
+        row_domain = normalize_domain(row["sender_domain"] or "")
+        if row["subject_pattern"] != pattern:
+            continue
+        if not row_domain or not domain or row_domain == domain:
+            return True
+    return False
+
+
+def save_gpt_help_suppression(sender_email="", subject="", note="User requested no GPT help for this email type"):
+    domain = normalize_domain(sender_domain(sender_email or ""))
+    pattern = normalized_subject_pattern(subject)
+    if not pattern:
+        raise RuntimeError("This item does not have enough email subject information to train a type.")
+    with connect_db() as con:
+        con.execute(
+            """
+            INSERT INTO gpt_help_suppressions(sender_domain,subject_pattern,note,enabled)
+            VALUES(?,?,?,1)
+            ON CONFLICT(sender_domain,subject_pattern)
+            DO UPDATE SET enabled=1,note=excluded.note
+            """,
+            (domain, pattern, note)
+        )
+    return {"sender_domain": domain, "subject_pattern": pattern}
+
+
+def store_not_task_training(
+    source_type,
+    source_id="",
+    sender_name="",
+    sender_email="",
+    subject="",
+    excerpt="",
+    reason="User marked Not a Task",
+):
+    sender_email = (sender_email or "").strip().lower()
+    domain = normalize_domain(sender_domain(sender_email))
+    with connect_db() as con:
+        con.execute(
+            """
+            INSERT INTO not_task_training
+            (source_type,source_id,sender_name,sender_email,sender_domain,subject,excerpt,reason)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                source_type, source_id, sender_name or "", sender_email, domain,
+                subject or "", (excerpt or "")[:1000], reason or "User marked Not a Task"
+            )
+        )
 
 
 def is_watched_domain(domain):
@@ -839,6 +1058,8 @@ Cc: {', '.join(x.get('email','') for x in email.get('cc_addresses',[]))}
 
 {watched_text}
 
+{not_task_training_prompt("gmail", 25)}
+
 Classify only work Todd/Smart 1 needs to perform.
 - client: answer, fix, deliver, create, schedule, investigate, update, approve, follow up, or otherwise handle for a customer/prospect/vendor.
 - payment: money Smart 1 needs to pay, fund, reconcile, cure, or prevent from becoming delinquent/suspended. Extract amount/invoice information if present.
@@ -850,7 +1071,8 @@ Suggested reply should be brief and useful, or empty when no reply is needed.
 Multiple-recipient email is especially important: preserve the broader chain context and do not dismiss a request merely because several people are included. If two or more people are in To/Cc/Bcc, an actionable item should normally be at least High priority unless clearly routine.
 Detect Google Meet / Gemini “Take notes for me” recap emails. For those set is_gemini_meeting_summary=true, extract meeting_title, meeting_summary, and EVERY concrete Suggested next step/action into meeting_tasks. Preserve any named assignee. Do not collapse several meeting action items into one. For non-meeting email return false, empty meeting strings, and an empty meeting_tasks array.
 Set gpt_can_help=true when a capable GPT could materially help complete the requested work itself (for example drafting content, analyzing information, producing a plan, writing code, creating a prompt for a technical fix, summarizing, researching supplied information, or preparing structured output).
-When gpt_can_help=true, create a ready-to-use gpt_help_prompt that includes the task, constraints, and desired result, but do not pretend the work is already finished. gpt_help_reason should say briefly why GPT can help.
+gpt_help_reason should say briefly why GPT can help.
+IMPORTANT COST CONTROL: always return gpt_help_prompt as an empty string during automatic email classification. The full prompt will be generated only if Todd clicks Prepare GPT Prompt.
 Do not claim something has been completed.
 
 EMAIL:
@@ -862,6 +1084,10 @@ MULTI-RECIPIENT THREAD CONTEXT (when available):
 {email.get('thread_context','') or 'Not loaded for this message.'}
 """.strip()
     result = openai_json(prompt, EMAIL_ANALYSIS_SCHEMA, "gmail_action_analysis")
+    if gpt_help_suppressed(email.get("sender_email", ""), email.get("subject", "")):
+        result["gpt_can_help"] = False
+        result["gpt_help_prompt"] = ""
+        result["gpt_help_reason"] = ""
     if watched and result.get("actionable") and result.get("category") != "ignore" and result.get("priority") == "normal":
         result["priority"] = "high"
     if int(email.get("recipient_count", 0) or 0) >= 2 and result.get("actionable") and result.get("category") != "ignore" and result.get("priority") == "normal":
@@ -1120,8 +1346,8 @@ def insert_task_from_suggestion(con, s):
         INSERT INTO tasks
         (category,party,title,detail,due_date,priority,status,email_url,email_to,email_subject,
          gmail_message_id,gmail_thread_id,amount,currency,invoice_number,invoice_sent,invoice_sent_at,
-         suggested_reply,ai_confidence,gpt_can_help,gpt_help_prompt,gpt_help_reason,recipient_count,source_kind)
-        VALUES (?,?,?,?,?,?,'Open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'gmail')
+         suggested_reply,ai_confidence,gpt_can_help,gpt_help_prompt,gpt_help_reason,recipient_count,source_kind,source_received_at)
+        VALUES (?,?,?,?,?,?,'Open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'gmail',?)
     """, (
         s["suggested_category"],
         s["sender_name"] or s["sender_email"] or "Gmail",
@@ -1145,6 +1371,7 @@ def insert_task_from_suggestion(con, s):
         s["gpt_help_prompt"] or "" if "gpt_help_prompt" in s.keys() else "",
         s["gpt_help_reason"] or "" if "gpt_help_reason" in s.keys() else "",
         int(s["recipient_count"] or 0) if "recipient_count" in s.keys() else 0,
+        s["received_at"] or "",
     ))
     task_id = cur.lastrowid
     try:
@@ -1197,6 +1424,15 @@ def sync_gmail():
         if int(email.get("recipient_count", 0) or 0) >= 2 and email.get("thread_id"):
             email["thread_context"] = gmail_thread_context(service, email["thread_id"], limit=14, char_budget=16000)
         domain = sender_domain(email["sender_email"])
+
+        # Hard ignore rules run before task matching or OpenAI analysis.
+        # This prevents explicitly trained automated sources such as xwf.google.com
+        # from creating tasks or making an existing task urgent.
+        if ignored_source("gmail", email.get("sender_email", ""), domain):
+            with connect_db() as con:
+                record_processed(con, message_id, email["thread_id"], "trained_not_task_source")
+            continue
+
         watched = is_watched_domain(domain)
 
         # Exact Gmail thread match: any new incoming message on an existing task makes it urgent.
@@ -2255,15 +2491,15 @@ def insert_task_from_chat_suggestion(con, s):
         INSERT INTO tasks
         (category,party,title,detail,due_date,priority,status,email_url,amount,currency,invoice_number,
          suggested_reply,ai_confidence,gpt_can_help,gpt_help_prompt,gpt_help_reason,source_kind,
-         chat_space_name,chat_thread_name,chat_message_name,chat_space_uri)
-        VALUES (?,?,?,?,?,?,'Open',?,?,?,?,?,?,?,?,?,'chat',?,?,?,?)
+         chat_space_name,chat_thread_name,chat_message_name,chat_space_uri,source_received_at)
+        VALUES (?,?,?,?,?,?,'Open',?,?,?,?,?,?,?,?,?,'chat',?,?,?,?,?)
         """,
         (s["suggested_category"], s["space_display_name"] or s["sender_display_name"] or "Google Chat",
          s["suggested_title"] or "Google Chat task", s["suggested_summary"] or s["message_text"],
          s["suggested_due_date"], s["suggested_priority"], s["space_uri"], float(s["payment_amount"] or 0),
          s["currency"] or "USD", s["invoice_number"] or "", s["suggested_reply"] or "", s["confidence"] or "",
          int(s["gpt_can_help"] or 0), s["gpt_help_prompt"] or "", s["gpt_help_reason"] or "",
-         s["space_name"], s["thread_name"], s["message_name"], s["space_uri"])
+         s["space_name"], s["thread_name"], s["message_name"], s["space_uri"], s["create_time"] or "")
     )
     task_id = cur.lastrowid
     con.execute("UPDATE chat_suggestions SET state='approved',updated_at=CURRENT_TIMESTAMP WHERE id=?", (s["id"],))
@@ -2461,6 +2697,8 @@ def serialize_task(row, con):
         (row["id"],)
     ).fetchall()
     item = dict(row)
+    if not item.get("source_received_at"):
+        item["source_received_at"] = item.get("created_at", "")
     item["notes"] = [dict(n) for n in notes]
     item["research_logs"] = []
     for r in research:
@@ -2710,6 +2948,8 @@ def system_status():
         "research_searches_all_history": True,
         "auto_add_invoices": get_setting("auto_add_invoices", "1") == "1",
         "chat_send_enabled": chat_connected,
+        "not_task_training_count": len(not_task_examples("gmail", 500)) + len(not_task_examples("chat", 500)),
+        "xwf_google_ignored": ignored_source("gmail", "notice@xwf.google.com", "xwf.google.com"),
     })
 
 
@@ -2814,6 +3054,50 @@ def dismiss_suggestion(suggestion_id):
     return jsonify({"ok": True})
 
 
+@app.post("/api/gmail/suggestions/<int:suggestion_id>/not-task")
+@login_required
+def train_gmail_not_task(suggestion_id):
+    payload = request.get_json(silent=True) or {}
+    with connect_db() as con:
+        s = con.execute(
+            "SELECT * FROM gmail_suggestions WHERE id=?",
+            (suggestion_id,)
+        ).fetchone()
+        if not s:
+            return jsonify({"error": "Suggestion not found"}), 404
+
+        store_not_task_training(
+            "gmail",
+            source_id=s["gmail_message_id"],
+            sender_name=s["sender_name"],
+            sender_email=s["sender_email"],
+            subject=s["subject"],
+            excerpt=s["snippet"] or s["suggested_summary"],
+            reason=(payload.get("reason") or "User marked Gmail suggestion Not a Task"),
+        )
+
+        con.execute(
+            """
+            UPDATE gmail_suggestions
+            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (suggestion_id,)
+        )
+        record_processed(
+            con,
+            s["gmail_message_id"],
+            s["gmail_thread_id"],
+            "user_trained_not_task"
+        )
+
+    return jsonify({
+        "ok": True,
+        "trained": True,
+        "message": "Saved as a NOT A TASK training example."
+    })
+
+
 
 # Google Chat review queue.
 @app.get("/api/chat/suggestions")
@@ -2856,6 +3140,50 @@ def dismiss_chat_suggestion(suggestion_id):
             (suggestion_id,)
         )
     return jsonify({"ok": True})
+
+
+@app.post("/api/chat/suggestions/<int:suggestion_id>/not-task")
+@login_required
+def train_chat_not_task(suggestion_id):
+    payload = request.get_json(silent=True) or {}
+    with connect_db() as con:
+        s = con.execute(
+            "SELECT * FROM chat_suggestions WHERE id=?",
+            (suggestion_id,)
+        ).fetchone()
+        if not s:
+            return jsonify({"error": "Chat suggestion not found"}), 404
+
+        store_not_task_training(
+            "chat",
+            source_id=s["message_name"],
+            sender_name=s["sender_display_name"],
+            sender_email="",
+            subject=s["suggested_title"] or s["space_display_name"],
+            excerpt=s["message_text"] or s["suggested_summary"],
+            reason=(payload.get("reason") or "User marked Chat suggestion Not a Task"),
+        )
+
+        con.execute(
+            """
+            UPDATE chat_suggestions
+            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (suggestion_id,)
+        )
+        chat_record_processed(
+            con,
+            s["message_name"],
+            s["space_name"],
+            "user_trained_not_task"
+        )
+
+    return jsonify({
+        "ok": True,
+        "trained": True,
+        "message": "Saved as a NOT A TASK training example."
+    })
 
 
 # Sent-mail follow-up dashboard.
@@ -2983,6 +3311,65 @@ def check_task_resolution(task_id):
     else:
         return jsonify({"error": "No communication is attached to this task yet."}), 400
     return jsonify({"ok": True, "assessment": result or {}})
+
+
+
+@app.post("/api/tasks/<int:task_id>/gpt-help/suppress")
+@login_required
+def suppress_task_gpt_help(task_id):
+    with connect_db() as con:
+        task = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+    try:
+        trained = save_gpt_help_suppression(
+            task["email_to"] or "",
+            task["email_subject"] or task["title"] or "",
+            "Todd selected Don't suggest GPT help for this email type."
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    with connect_db() as con:
+        con.execute(
+            """
+            UPDATE tasks
+            SET gpt_can_help=0,gpt_help_prompt='',gpt_help_reason='',updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (task_id,)
+        )
+        con.execute(
+            "INSERT INTO notes(task_id,body) VALUES(?,?)",
+            (task_id, "Trained: do not suggest GPT help for future emails of this type.")
+        )
+    return jsonify({"ok": True, "trained": trained})
+
+
+@app.post("/api/gmail/suggestions/<int:suggestion_id>/gpt-help/suppress")
+@login_required
+def suppress_suggestion_gpt_help(suggestion_id):
+    with connect_db() as con:
+        s = con.execute("SELECT * FROM gmail_suggestions WHERE id=?", (suggestion_id,)).fetchone()
+        if not s:
+            return jsonify({"error": "Suggestion not found"}), 404
+    try:
+        trained = save_gpt_help_suppression(
+            s["sender_email"] or "",
+            s["subject"] or s["suggested_title"] or "",
+            "Todd selected Don't suggest GPT help for this email type from Gmail Review."
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    with connect_db() as con:
+        con.execute(
+            """
+            UPDATE gmail_suggestions
+            SET gpt_can_help=0,gpt_help_prompt='',gpt_help_reason='',updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (suggestion_id,)
+        )
+    return jsonify({"ok": True, "trained": trained})
 
 
 @app.post("/api/tasks/<int:task_id>/gpt-help")
@@ -3184,18 +3571,45 @@ def list_tasks():
         return jsonify([serialize_task(r, con) for r in rows])
 
 
+
+@app.get("/api/invoices")
+@login_required
+def invoice_register():
+    """Complete invoice register: open + paid invoice records."""
+    with connect_db() as con:
+        rows = con.execute(
+            """
+            SELECT * FROM tasks
+            WHERE category='payment'
+              AND (invoice_sent=1 OR COALESCE(invoice_number,'') <> '')
+            ORDER BY
+              completed ASC,
+              CASE WHEN due_date='' THEN 1 ELSE 0 END,
+              due_date ASC,
+              source_received_at DESC,
+              id DESC
+            """
+        ).fetchall()
+        return jsonify([serialize_task(r, con) for r in rows])
+
+
 @app.get("/api/payment-summary")
 @login_required
 def payment_summary():
     with connect_db() as con:
         row = con.execute("""
-            SELECT COUNT(*) AS count_all,
-                   COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) AS total_known,
-                   SUM(CASE WHEN invoice_sent=1 THEN 1 ELSE 0 END) AS invoice_count,
-                   COALESCE(SUM(CASE WHEN invoice_sent=1 AND amount>0 THEN amount ELSE 0 END),0) AS invoice_total,
-                   SUM(CASE WHEN due_date<>'' AND due_date<date('now') THEN 1 ELSE 0 END) AS overdue_count,
-                   COALESCE(SUM(CASE WHEN due_date<>'' AND due_date<date('now') AND amount>0 THEN amount ELSE 0 END),0) AS overdue_total
-            FROM tasks WHERE completed=0 AND category='payment'
+            SELECT
+                   SUM(CASE WHEN completed=0 THEN 1 ELSE 0 END) AS count_all,
+                   COALESCE(SUM(CASE WHEN completed=0 AND amount>0 THEN amount ELSE 0 END),0) AS total_known,
+                   SUM(CASE WHEN completed=0 AND invoice_sent=1 THEN 1 ELSE 0 END) AS invoice_count,
+                   COALESCE(SUM(CASE WHEN completed=0 AND invoice_sent=1 AND amount>0 THEN amount ELSE 0 END),0) AS invoice_total,
+                   SUM(CASE WHEN completed=0 AND due_date<>'' AND due_date<date('now') THEN 1 ELSE 0 END) AS overdue_count,
+                   COALESCE(SUM(CASE WHEN completed=0 AND due_date<>'' AND due_date<date('now') AND amount>0 THEN amount ELSE 0 END),0) AS overdue_total,
+                   SUM(CASE WHEN (invoice_sent=1 OR COALESCE(invoice_number,'')<>'') THEN 1 ELSE 0 END) AS invoice_register_count,
+                   SUM(CASE WHEN completed=0 AND (invoice_sent=1 OR COALESCE(invoice_number,'')<>'') THEN 1 ELSE 0 END) AS invoice_unpaid_count,
+                   SUM(CASE WHEN completed=1 AND (invoice_sent=1 OR COALESCE(invoice_number,'')<>'') THEN 1 ELSE 0 END) AS invoice_paid_count,
+                   COALESCE(SUM(CASE WHEN completed=1 AND (invoice_sent=1 OR COALESCE(invoice_number,'')<>'') AND paid_amount>0 THEN paid_amount ELSE 0 END),0) AS invoice_paid_total
+            FROM tasks WHERE category='payment'
         """).fetchone()
         return jsonify(dict(row))
 
@@ -3211,8 +3625,8 @@ def create_task():
         cur = con.execute("""
             INSERT INTO tasks
             (category,party,title,detail,due_date,priority,status,email_url,email_to,email_subject,
-             amount,currency,invoice_number,invoice_sent,invoice_sent_at,assignee)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             amount,currency,invoice_number,invoice_sent,invoice_sent_at,assignee,source_received_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             payload.get("category", "client"), payload.get("party", "Unassigned").strip() or "Unassigned",
             title, (payload.get("detail") or "").strip(), payload.get("due_date", ""),
@@ -3222,6 +3636,7 @@ def create_task():
             1 if payload.get("invoice_sent") else 0,
             datetime.now().astimezone().isoformat(timespec="seconds") if payload.get("invoice_sent") else "",
             (payload.get("assignee") or "").strip(),
+            datetime.now().astimezone().isoformat(timespec="seconds"),
         ))
         row = con.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
         return jsonify(serialize_task(row, con)), 201

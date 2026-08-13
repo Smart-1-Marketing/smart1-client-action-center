@@ -47,7 +47,7 @@
   <nav class="tabs" aria-label="Dashboard sections">
     <button class="tab active" data-tab="client">Client Tasks <span id="tabClientCount">0</span></button>
     <button class="tab" data-tab="payment">Finances <span id="tabPaymentCount">0</span></button>
-    <button class="tab" data-tab="invoice">Invoices to Pay <span id="tabInvoiceCount">0</span></button>
+    <button class="tab" data-tab="invoice">Invoice Register <span id="tabInvoiceCount">0</span></button>
     <button class="tab" data-tab="sent">Sent Follow-ups <span id="tabSentCount">0</span></button>
     <button class="tab" data-tab="gmail">Gmail Review <span id="tabGmailCount">0</span></button>
     <button class="tab" data-tab="chat">Chat Review <span id="tabChatCount">0</span></button>
@@ -76,12 +76,12 @@
 
   <section id="invoiceView" class="view hidden">
     <section class="metrics">
-      <button class="metric score-purple" data-quick="invoice-all"><span>Invoices to Pay</span><strong id="invoiceCount">0</strong><small>Click to show all</small></button>
-      <button class="metric score-green" data-quick="invoice-known"><span>Known Invoice Total</span><strong id="invoiceTotal">$0</strong><small>Invoices with amounts</small></button>
-      <button class="metric score-red" data-quick="invoice-overdue"><span>Overdue Invoices</span><strong id="invoiceOverdue">0</strong><small>Click to filter</small></button>
-      <button class="metric score-orange" data-quick="invoice-missing"><span>Without Amount</span><strong id="invoiceNoAmount">0</strong><small>Needs amount entered</small></button>
+      <button class="metric score-purple" data-quick="invoice-all"><span>All Invoices</span><strong id="invoiceCount">0</strong><small>Open + paid</small></button>
+      <button class="metric score-blue" data-quick="invoice-unpaid"><span>Unpaid Invoices</span><strong id="invoiceTotal">0</strong><small>Click to show what needs paid</small></button>
+      <button class="metric score-red" data-quick="invoice-overdue"><span>Overdue Invoices</span><strong id="invoiceOverdue">0</strong><small>Unpaid and overdue</small></button>
+      <button class="metric score-green" data-quick="invoice-paid"><span>Paid Invoices</span><strong id="invoiceNoAmount">0</strong><small>Payment history</small></button>
     </section>
-    <div class="callout">Only open payment items flagged <strong>Invoice Sent</strong> appear here.</div>
+    <div class="callout"><strong>Complete Invoice Register:</strong> this includes every invoice detected or manually entered, including invoices still due and invoices already marked paid. Use the scorecards to jump directly to unpaid, overdue, or paid invoices.</div>
   </section>
 
   <section id="sentView" class="view hidden">
@@ -115,7 +115,15 @@
   <section id="taskControls" class="filters">
     <label>Search<input id="search" type="search" placeholder="Search task, client, vendor, assignee or participant"></label>
     <label>Status
-      <select id="statusFilter"><option value="all">All Statuses</option><option>Open</option><option>Working</option><option>Waiting</option><option>Blocked</option></select>
+      <select id="statusFilter"><option value="all">All Statuses</option><option>Open</option><option>Working</option><option>Waiting</option><option>Blocked</option><option>Completed</option></select>
+    </label>
+    <label>Sort
+      <select id="sortBy">
+        <option value="due">Due Date</option>
+        <option value="received-newest">Date Received — Newest</option>
+        <option value="received-oldest">Date Received — Oldest</option>
+        <option value="priority">Priority</option>
+      </select>
     </label>
     <div class="filter-button"><button id="clearQuickFilter" class="button secondary hidden">Clear Scorecard Filter</button></div>
     <div class="filter-button"><button id="addTaskBtn" class="button secondary">+ Add Task</button></div>

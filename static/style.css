@@ -66,3 +66,29 @@ dialog{border:none;border-radius:16px;padding:0;width:min(720px,calc(100% - 30px
 
 /* Chat + finance additions */
 #chatReplyDialog .callout{margin-top:0}
+
+.not-task-button{
+  background:var(--gray-soft);
+  color:var(--text);
+  border-color:var(--border);
+  font-weight:700;
+}
+.not-task-button:hover{
+  outline:2px solid var(--border);
+}
+
+.task-received{
+  font-size:12px;
+  font-weight:700;
+  color:var(--muted);
+  margin:2px 0 4px;
+}
+.paid-status{
+  display:inline-flex;
+  align-items:center;
+  border-radius:999px;
+  padding:8px 11px;
+  background:var(--green-soft);
+  color:var(--green);
+  font-weight:700;
+}

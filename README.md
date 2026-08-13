@@ -338,3 +338,96 @@ Payment items now collect:
 - Paid timestamp
 
 Then the item moves to Completed while keeping the invoice email and history.
+## NOT A TASK training
+
+The Gmail Review and Google Chat Review queues now include:
+
+```text
+Not a Task — Train
+```
+
+This is different from **Dismiss**:
+
+- **Dismiss** removes the current suggestion only.
+- **Not a Task — Train** removes the suggestion and stores it as a negative AI training example.
+- Future OpenAI classification prompts include recent user-trained negative examples so similar automated/informational communications are less likely to become tasks.
+- Training examples do **not** automatically blacklist an entire customer domain.
+
+### Permanent ignore: xwf.google.com
+
+`xwf.google.com` is seeded as a hard Gmail ignore domain.
+
+Messages from that domain:
+- are marked processed
+- are not sent to OpenAI for task classification
+- do not create Gmail Review suggestions
+- do not make an existing task urgent simply because the message is in a related thread
+
+Existing unapproved Gmail suggestions from `@xwf.google.com` are automatically moved out of the review queue during database initialization.
+
+The app intentionally does not delete any already-approved/live task automatically.
+## Task received date + sorting
+
+Every task card now shows:
+
+```text
+Received: Aug 13, 2026, 2:15 PM
+```
+
+For Gmail tasks this is the original email timestamp.
+For Google Chat tasks this is the original Chat message timestamp.
+For manual tasks it is the task creation time.
+
+The task toolbar can sort by:
+- Due Date
+- Date Received — Newest
+- Date Received — Oldest
+- Priority
+
+Older live records are backfilled automatically from their Gmail/Chat source or task creation time.
+
+## Complete Invoice Register
+
+The former **Invoices to Pay** tab is now **Invoice Register**.
+
+It shows all invoice records:
+- unpaid
+- overdue
+- paid
+
+Scorecards:
+- All Invoices
+- Unpaid Invoices
+- Overdue Invoices
+- Paid Invoices
+
+The **Finances** tab remains the working list of open payment obligations.
+The **Invoice Register** is the complete invoice history.
+
+Paid invoice cards retain:
+- paid amount
+- paid date/time
+- payment reference
+- invoice email/history
+
+## GPT prompt cost control
+
+Automatic Gmail classification still asks the AI whether GPT could help, but it no longer asks the model to write the full ready-to-use GPT prompt during the automatic scan.
+
+The full prompt is generated only when Todd clicks:
+
+```text
+Prepare GPT Prompt
+```
+
+The app also adds:
+
+```text
+Don't Suggest GPT Help for This Type
+```
+
+This saves a subject-template + sender-domain suppression rule so similar emails stop showing the GPT-help recommendation.
+
+This is separate from **Not a Task — Train**:
+- Not a Task = the communication itself should not become a task.
+- Don't Suggest GPT Help = it can remain a valid task, but stop recommending GPT assistance for that type.

@@ -84,3 +84,43 @@ https://www.googleapis.com/auth/chat.messages.readonly
 - [ ] Leave **Auto-add incoming invoices to Finances** enabled.
 - [ ] Test **Reply in Chat** on a Chat-linked task.
 - [ ] Test **Mark Paid** and save a payment reference.
+## Not-a-Task training update
+
+For this update replace:
+
+```text
+app.py
+static/app.js
+static/style.css
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Do not delete `/var/data/tasks.db`.
+
+After Render redeploys:
+1. `xwf.google.com` is automatically registered as a hard ignore source.
+2. Gmail Review and Chat Review show **Not a Task — Train**.
+3. Use **Dismiss** only when an item is irrelevant once.
+4. Use **Not a Task — Train** when you want the AI to learn that this type of communication should not become a task.
+## Date + Invoice Register + GPT cost controls
+
+Replace:
+```text
+app.py
+templates/index.html
+static/app.js
+static/style.css
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Keep `/var/data/tasks.db`.
+
+After redeploy:
+1. Existing tasks will receive a backfilled source date.
+2. Task cards show Received date and can sort by it.
+3. Open **Invoice Register** to see unpaid + paid invoices.
+4. **Finances** remains the open bills/payments working dashboard.
+5. Full GPT prompts are generated only when **Prepare GPT Prompt** is clicked.
+6. Use **Don't Suggest GPT Help for This Type** when a valid task should no longer get GPT-help suggestions.
