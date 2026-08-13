@@ -5,6 +5,8 @@ import re
 import sqlite3
 import threading
 import time
+import traceback
+import html
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
@@ -18,9 +20,16 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from openai import OpenAI
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
+# Honor Render's X-Forwarded-Proto/X-Forwarded-Host so externally generated
+# OAuth URLs use the public HTTPS address.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.secret_key = os.environ.get("SECRET_KEY", "change-this-in-render")
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+if os.environ.get("RENDER", "").lower() == "true":
+    app.config["SESSION_COOKIE_SECURE"] = True
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -2510,30 +2519,141 @@ def index():
     return render_template("index.html")
 
 
+def google_oauth_error_page(title, detail, status=400):
+    safe_title = html.escape(str(title))
+    safe_detail = html.escape(str(detail))
+    safe_redirect = html.escape(redirect_uri())
+    safe_scopes = "<br>".join(html.escape(s) for s in GOOGLE_SCOPES)
+    return f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>{safe_title}</title>
+      <style>
+        body{{font-family:Arial,sans-serif;background:#f5f7fb;color:#18202a;margin:0;padding:32px}}
+        .card{{max-width:860px;margin:auto;background:#fff;border:1px solid #dce2ea;border-radius:16px;padding:24px}}
+        h1{{margin-top:0;color:#b91c1c}} code{{background:#eef2f7;padding:2px 5px;border-radius:5px}}
+        .box{{background:#f8fafc;border:1px solid #dce2ea;border-radius:10px;padding:12px;margin:12px 0;word-break:break-word}}
+        a{{color:#2563eb}}
+      </style>
+    </head>
+    <body><div class="card">
+      <h1>{safe_title}</h1>
+      <p>The Google connection did not complete. The actual error is shown below instead of a generic Internal Server Error.</p>
+      <div class="box"><strong>Error</strong><br>{safe_detail}</div>
+      <p><strong>Expected redirect URI</strong></p>
+      <div class="box"><code>{safe_redirect}</code></div>
+      <p><strong>Scopes requested by this app</strong></p>
+      <div class="box">{safe_scopes}</div>
+      <p><a href="/gmail/connect">Try Google connection again</a> &nbsp; | &nbsp; <a href="/">Return to Action Center</a></p>
+    </div></body></html>
+    """, status
+
+
 @app.get("/gmail/connect")
 @login_required
 def gmail_connect():
     if not gmail_configured():
-        return "Google OAuth is not configured in Render.", 400
-    flow = Flow.from_client_config(oauth_client_config(), scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri())
-    authorization_url, state = flow.authorization_url(
-        access_type="offline", include_granted_scopes="true", prompt="consent"
-    )
-    session["google_oauth_state"] = state
-    return redirect(authorization_url)
+        return google_oauth_error_page(
+            "Google OAuth is not configured",
+            "GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing in Render.",
+            400,
+        )
+
+    try:
+        flow = Flow.from_client_config(
+            oauth_client_config(),
+            scopes=GOOGLE_SCOPES,
+            redirect_uri=redirect_uri(),
+        )
+
+        # IMPORTANT:
+        # This application may share a Google project/client with other Smart 1
+        # utilities that have previously requested Ads, Analytics, GTM, etc.
+        # Asking Google to automatically include those previously granted scopes
+        # can cause the token response to contain scopes this application did not
+        # request. Keep this OAuth grant isolated to the Gmail + Chat scopes.
+        authorization_url, state = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="false",
+            prompt="consent",
+        )
+        session["google_oauth_state"] = state
+        session.modified = True
+        return redirect(authorization_url)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        set_setting("gmail_last_error", f"OAuth start failed: {detail}")
+        app.logger.exception("Google OAuth start failed")
+        return google_oauth_error_page("Google Connection Failed", detail, 500)
 
 
 @app.get("/gmail/callback")
 @login_required
 def gmail_callback():
-    flow = Flow.from_client_config(
-        oauth_client_config(), scopes=GOOGLE_SCOPES,
-        state=session.get("google_oauth_state"), redirect_uri=redirect_uri()
-    )
-    flow.fetch_token(authorization_response=request.url)
-    save_credentials(flow.credentials)
-    set_setting("gmail_last_error", "")
-    return redirect(url_for("index"))
+    google_error = request.args.get("error")
+    if google_error:
+        description = request.args.get("error_description", "")
+        detail = f"{google_error}: {description}".strip(": ")
+        set_setting("gmail_last_error", f"Google authorization denied: {detail}")
+        return google_oauth_error_page("Google Authorization Was Not Completed", detail, 400)
+
+    expected_state = session.get("google_oauth_state")
+    returned_state = request.args.get("state")
+
+    if not expected_state:
+        detail = (
+            "The OAuth session state was missing when Google returned to the app. "
+            "This can happen if the browser session/cookie changed during authorization. "
+            "Start the Google connection again from the Action Center."
+        )
+        set_setting("gmail_last_error", detail)
+        return google_oauth_error_page("Google OAuth Session Lost", detail, 400)
+
+    if returned_state != expected_state:
+        detail = (
+            "The OAuth state returned by Google did not match the state stored by the app. "
+            "Start the connection again in the same browser tab/session."
+        )
+        set_setting("gmail_last_error", detail)
+        return google_oauth_error_page("Google OAuth State Mismatch", detail, 400)
+
+    try:
+        flow = Flow.from_client_config(
+            oauth_client_config(),
+            scopes=GOOGLE_SCOPES,
+            state=expected_state,
+            redirect_uri=redirect_uri(),
+        )
+        flow.fetch_token(authorization_response=request.url)
+
+        creds = flow.credentials
+        granted = set(getattr(creds, "granted_scopes", None) or getattr(creds, "scopes", None) or [])
+        missing = [scope for scope in GOOGLE_SCOPES if scope not in granted]
+
+        if missing:
+            detail = "Google connected but did not grant all required scopes. Missing: " + ", ".join(missing)
+            set_setting("gmail_last_error", detail)
+            # Keep the credentials so Gmail-only access can still be inspected,
+            # but show the user exactly which Chat permission was not granted.
+            save_credentials(creds)
+            return google_oauth_error_page("Google Permissions Incomplete", detail, 400)
+
+        save_credentials(creds)
+        set_setting("gmail_last_error", "")
+        session.pop("google_oauth_state", None)
+        return redirect(url_for("index"))
+
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        set_setting("gmail_last_error", f"OAuth callback failed: {detail}")
+        app.logger.error(
+            "Google OAuth callback failed:\n%s",
+            traceback.format_exc(),
+        )
+        return google_oauth_error_page("Google Connection Failed", detail, 400)
 
 
 @app.get("/api/system/status")
