@@ -149,3 +149,36 @@ dialog{border:none;border-radius:16px;padding:0;width:min(720px,calc(100% - 30px
   .compact-header-actions{width:100%;overflow-x:auto;justify-content:flex-start;padding-bottom:4px}
   .sync-status{display:none}
 }
+
+
+/* Collapsed activity sections */
+.collapsed-log{
+  margin-top:10px;
+  border:1px solid var(--border);
+  border-radius:10px;
+  overflow:hidden;
+}
+.collapsed-log summary{
+  cursor:pointer;
+  font-weight:700;
+  padding:10px 12px;
+  background:var(--card2);
+  user-select:none;
+}
+.collapsed-log-body{padding:8px 12px 12px}
+.compact-gpt-actions{padding:8px 0}
+
+
+/* Compact task-menu buttons: closer to the main Client Tasks / Finances / Invoice Register tabs */
+.task-action{
+  font-size:12px !important;
+  line-height:1.1 !important;
+  font-weight:700 !important;
+  padding:7px 10px !important;
+  min-height:30px !important;
+  border-radius:9px !important;
+}
+.actions{
+  gap:6px !important;
+  row-gap:6px !important;
+}

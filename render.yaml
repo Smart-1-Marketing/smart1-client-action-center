@@ -11,6 +11,10 @@ services:
     envVars:
       - key: DATA_DIR
         value: /var/data
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: MALLOC_TRIM_THRESHOLD_
+        value: "131072"
       - key: SECRET_KEY
         generateValue: true
       - key: APP_PASSWORD
@@ -30,11 +34,11 @@ services:
       - key: GMAIL_SYNC_QUERY
         value: "newer_than:30d -in:sent -in:drafts -in:spam -in:trash -category:promotions -category:social -category:forums"
       - key: GMAIL_SCAN_MAX_MESSAGES
-        value: "500"
+        value: "300"
       - key: GMAIL_ANALYZE_MAX_NEW
-        value: "40"
+        value: "25"
       - key: OPENAI_EMAIL_BODY_CHARS
-        value: "8000"
+        value: "6000"
       - key: EMAIL_RESEARCH_MAX_MESSAGES
         value: "500"
       - key: EMAIL_DISCOVERY_MAX_MESSAGES
@@ -46,17 +50,17 @@ services:
       - key: SENT_FOLLOWUP_AFTER_DAYS
         value: "3"
       - key: SENT_SCAN_MAX_MESSAGES
-        value: "200"
+        value: "120"
       - key: CHAT_SYNC_LOOKBACK_DAYS
         value: "30"
       - key: CHAT_SCAN_MAX_SPACES
-        value: "100"
+        value: "60"
       - key: CHAT_SCAN_MAX_MESSAGES_PER_SPACE
-        value: "75"
+        value: "50"
       - key: WATCH_DOMAIN_LOOKBACK_DAYS
         value: "90"
       - key: AI_CONTEXT_CHAR_BUDGET
-        value: "60000"
+        value: "45000"
     disk:
       name: smart1-action-data
       mountPath: /var/data

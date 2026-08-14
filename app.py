@@ -13,6 +13,7 @@ from email.mime.text import MIMEText
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
+from urllib import error as urllib_error, request as urllib_request
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -20,7 +21,6 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from openai import OpenAI
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
@@ -533,6 +533,25 @@ def init_db():
             VALUES('chat','space','sales team to me','Explicitly removed by user',1)
             """
         )
+        con.execute(
+            """
+            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
+            VALUES('chat','space','client success','Explicitly removed by user',1)
+            """
+        )
+
+        con.execute(
+            """
+            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
+            VALUES('gmail','sender_name','quickbooks payments','Explicitly removed by user',1)
+            """
+        )
+        con.execute(
+            """
+            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
+            VALUES('chat','space','quickbooks payments','Explicitly removed by user',1)
+            """
+        )
 
         con.execute(
             """
@@ -548,14 +567,14 @@ def init_db():
             INSERT INTO notes(task_id,body)
             SELECT id,'Removed from open tasks because the Google Chat space "Sales Team to Me" is ignored.'
             FROM tasks
-            WHERE completed=0 AND source_kind='chat' AND lower(trim(party))='sales team to me'
+            WHERE completed=0 AND source_kind='chat' AND lower(trim(party)) IN ('sales team to me','client success')
             """
         )
         con.execute(
             """
             UPDATE tasks
             SET completed=1,completed_at=CURRENT_TIMESTAMP,status='Completed',updated_at=CURRENT_TIMESTAMP
-            WHERE completed=0 AND source_kind='chat' AND lower(trim(party))='sales team to me'
+            WHERE completed=0 AND source_kind='chat' AND lower(trim(party)) IN ('sales team to me','client success')
             """
         )
         con.execute(
@@ -564,6 +583,46 @@ def init_db():
             SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
             WHERE lower(sender_email) LIKE '%@xwf.google.com'
               AND state='new'
+            """
+        )
+
+        con.execute(
+            """
+            UPDATE gmail_suggestions
+            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
+            WHERE lower(trim(sender_name))='quickbooks payments'
+              AND state='new'
+            """
+        )
+        con.execute(
+            """
+            UPDATE chat_suggestions
+            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
+            WHERE lower(trim(space_display_name)) IN ('sales team to me','client success','quickbooks payments')
+              AND state='new'
+            """
+        )
+        con.execute(
+            """
+            UPDATE sent_monitors
+            SET state='dismissed'
+            WHERE state='monitoring'
+              AND lower(trim(party))='quickbooks payments'
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO notes(task_id,body)
+            SELECT id,'Removed from open tasks because "QuickBooks Payments" is ignored.'
+            FROM tasks
+            WHERE completed=0 AND lower(trim(party))='quickbooks payments'
+            """
+        )
+        con.execute(
+            """
+            UPDATE tasks
+            SET completed=1,completed_at=CURRENT_TIMESTAMP,status='Completed',updated_at=CURRENT_TIMESTAMP
+            WHERE completed=0 AND lower(trim(party))='quickbooks payments'
             """
         )
 
@@ -780,9 +839,10 @@ def watch_domains(enabled_only=True):
         return [dict(r) for r in rows]
 
 
-def ignored_source(source_type, sender_email="", domain=""):
+def ignored_source(source_type, sender_email="", domain="", sender_name=""):
     source_type = (source_type or "").strip().lower()
     sender_email = (sender_email or "").strip().lower()
+    sender_name = (sender_name or "").strip().lower()
     domain = normalize_domain(domain or sender_domain(sender_email))
     with connect_db() as con:
         rows = con.execute(
@@ -795,6 +855,8 @@ def ignored_source(source_type, sender_email="", domain=""):
     for row in rows:
         value = (row["value"] or "").strip().lower()
         if row["rule_type"] == "email" and sender_email and sender_email == value:
+            return True
+        if row["rule_type"] == "sender_name" and sender_name and sender_name == value:
             return True
         if row["rule_type"] == "domain" and domain:
             watched = normalize_domain(value)
@@ -962,6 +1024,28 @@ def parse_address_header(value):
     ]
 
 
+def strip_todd_sent_signature(text):
+    """Remove Todd's known Smart 1 signature before Sent-mail AI analysis."""
+    if not text:
+        return ""
+    lower = text.lower()
+    start = 0
+    while True:
+        idx = lower.find("todd swickard", start)
+        if idx < 0:
+            return text.strip()
+        window = lower[idx:idx + 700]
+        signature_fingerprints = (
+            "chief executive officer" in window
+            and "todd@smart1marketing.com" in window
+            and "614-342-0814" in window
+            and "please use smart 1 team" in window
+        )
+        if signature_fingerprints:
+            return text[:idx].rstrip()
+        start = idx + len("todd swickard")
+
+
 def gmail_parse_message(msg):
     message_id = msg.get("id", "")
     headers = msg.get("payload", {}).get("headers", [])
@@ -979,6 +1063,12 @@ def gmail_parse_message(msg):
             seen.add(email)
             participants.append(item)
     labels = set(msg.get("labelIds", []) or [])
+    is_sent = "SENT" in labels
+    snippet = msg.get("snippet", "") or ""
+    body = extract_text_part(msg.get("payload", {}))
+    if is_sent:
+        snippet = strip_todd_sent_signature(snippet)
+        body = strip_todd_sent_signature(body)
     return {
         "message_id": message_id,
         "thread_id": msg.get("threadId", ""),
@@ -986,15 +1076,15 @@ def gmail_parse_message(msg):
         "sender_name": sender_name,
         "sender_email": (sender_email or "").lower(),
         "received": received_datetime(header_value(headers, "Date")),
-        "snippet": msg.get("snippet", "") or "",
-        "body": extract_text_part(msg.get("payload", {})),
+        "snippet": snippet,
+        "body": body,
         "url": f"https://mail.google.com/mail/u/0/#all/{message_id}",
         "to_addresses": to_addresses,
         "cc_addresses": cc_addresses,
         "bcc_addresses": bcc_addresses,
         "participants": participants,
         "recipient_count": len(to_addresses) + len(cc_addresses) + len(bcc_addresses),
-        "is_sent": "SENT" in labels,
+        "is_sent": is_sent,
     }
 
 
@@ -1037,28 +1127,28 @@ def gmail_thread_context(service, thread_id, limit=12, char_budget=14000):
 
 # ---------------- OpenAI structured helpers ----------------
 
-_OPENAI_CLIENT = None
-_OPENAI_CLIENT_LOCK = threading.Lock()
-
-
-def openai_client():
-    """Reuse one OpenAI HTTP connection pool instead of one client per AI call."""
-    global _OPENAI_CLIENT
-    if _OPENAI_CLIENT is None:
-        with _OPENAI_CLIENT_LOCK:
-            if _OPENAI_CLIENT is None:
-                _OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
-    return _OPENAI_CLIENT
+def extract_response_output_text(data):
+    if isinstance(data, dict):
+        direct = data.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                    return content["text"].strip()
+    return ""
 
 
 def openai_json(prompt, schema, name):
+    """Low-memory Responses API call without importing the OpenAI Python SDK."""
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
-    response = openai_client().responses.create(
-        model=OPENAI_MODEL,
-        input=prompt,
-        store=False,
-        text={
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": prompt,
+        "store": False,
+        "text": {
             "format": {
                 "type": "json_schema",
                 "name": name,
@@ -1066,8 +1156,47 @@ def openai_json(prompt, schema, name):
                 "schema": schema,
             }
         },
+    }
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    req = urllib_request.Request(
+        "https://api.openai.com/v1/responses",
+        data=encoded,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "Smart1-Client-Action-Center/1.0",
+        },
     )
-    return json.loads(response.output_text)
+
+    try:
+        with urllib_request.urlopen(req, timeout=180) as response:
+            raw = response.read()
+    except urllib_error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        raise RuntimeError(f"OpenAI API HTTP {exc.code}: {detail[:1200]}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"OpenAI API connection error: {exc.reason}") from exc
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("OpenAI API returned an unreadable response.") from exc
+
+    output_text = extract_response_output_text(data)
+    if not output_text:
+        api_error = data.get("error") if isinstance(data, dict) else None
+        if api_error:
+            raise RuntimeError(f"OpenAI API error: {api_error}")
+        raise RuntimeError("OpenAI response did not contain output text.")
+
+    try:
+        return json.loads(output_text)
+    except Exception as exc:
+        raise RuntimeError(f"OpenAI structured output was not valid JSON: {output_text[:500]}") from exc
 
 
 MEETING_TASK_ITEM_SCHEMA = {
@@ -1512,7 +1641,7 @@ def sync_gmail():
         # Hard ignore rules run before task matching or OpenAI analysis.
         # This prevents explicitly trained automated sources such as xwf.google.com
         # from creating tasks or making an existing task urgent.
-        if ignored_source("gmail", email.get("sender_email", ""), domain):
+        if ignored_source("gmail", email.get("sender_email", ""), domain, email.get("sender_name", "")):
             with connect_db() as con:
                 record_processed(con, message_id, email["thread_id"], "trained_not_task_source")
             continue
@@ -2320,6 +2449,28 @@ def sync_sent_mail():
             if con.execute("SELECT 1 FROM sent_monitors WHERE gmail_message_id=?", (message_id,)).fetchone():
                 continue
         email = gmail_get_full(service, message_id)
+        sent_recipient_names = {
+            (x.get("name") or "").strip().lower()
+            for x in (email.get("to_addresses", []) + email.get("cc_addresses", []) + email.get("bcc_addresses", []))
+        }
+        if "quickbooks payments" in sent_recipient_names:
+            with connect_db() as con:
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO sent_monitors
+                    (gmail_message_id,gmail_thread_id,task_id,recipients,subject,sent_at,followup_due,state,reason,email_url,party,summary,priority,recipient_count)
+                    VALUES (?,?,?,?,?,?,?,'ignored',?,?,?,?,?,?)
+                    """,
+                    (
+                        message_id, email["thread_id"], 0,
+                        ", ".join(x.get("email","") for x in email.get("to_addresses", []) if x.get("email")),
+                        email.get("subject",""), email["received"].isoformat(), "",
+                        "QuickBooks Payments is an ignored follow-up source.",
+                        email.get("url",""), "QuickBooks Payments", "", "normal",
+                        int(email.get("recipient_count",0) or 0),
+                    )
+                )
+            continue
         if int(email.get("recipient_count", 0) or 0) >= 2 and email.get("thread_id"):
             email["thread_context"] = gmail_thread_context(service, email["thread_id"], limit=14, char_budget=16000)
         analysis = None
@@ -2823,7 +2974,7 @@ def sync_all_communications():
             set_setting("gmail_last_error", str(exc))
             result["gmail"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         try:
             result["meetings"] = sync_meeting_recaps()
@@ -2831,7 +2982,7 @@ def sync_all_communications():
             set_setting("meeting_last_error", str(exc))
             result["meetings"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         try:
             result["sent"] = sync_sent_mail()
@@ -2839,7 +2990,7 @@ def sync_all_communications():
             set_setting("sent_last_error", str(exc))
             result["sent"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         try:
             result["chat"] = sync_google_chat()
@@ -2847,7 +2998,7 @@ def sync_all_communications():
             set_setting("chat_last_error", str(exc))
             result["chat"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         return result
     finally:
@@ -2876,7 +3027,20 @@ def manual_sync_worker():
         with MANUAL_SYNC_STATE_LOCK:
             MANUAL_SYNC_STATE["running"] = False
             MANUAL_SYNC_STATE["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        gc.collect()
+        release_process_memory()
+
+
+def release_process_memory():
+    """Best-effort release of Python objects and freed glibc heap pages back to Render."""
+    gc.collect()
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        trim = getattr(libc, "malloc_trim", None)
+        if trim:
+            trim(0)
+    except Exception:
+        pass
 
 
 # ---------------- Background sync ----------------
@@ -2890,7 +3054,7 @@ def background_sync_loop():
         except Exception as exc:
             set_setting("gmail_last_error", str(exc))
         finally:
-            gc.collect()
+            release_process_memory()
         time.sleep(max(60, AUTO_GMAIL_SYNC_MINUTES * 60))
 
 
@@ -2902,20 +3066,20 @@ if AUTO_GMAIL_SYNC_MINUTES > 0 and os.environ.get("DISABLE_BACKGROUND_GMAIL_SYNC
 
 def serialize_task(row, con):
     notes = con.execute(
-        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 8", (row["id"],)
+        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 3", (row["id"],)
     ).fetchall()
     research = con.execute(
-        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 4",
+        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 2",
         (row["id"],)
     ).fetchall()
     updates = con.execute(
         "SELECT id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails,created_at "
-        "FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 6",
+        "FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 3",
         (row["id"],)
     ).fetchall()
     chat_updates = con.execute(
         "SELECT id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction,created_at "
-        "FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 8",
+        "FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 3",
         (row["id"],)
     ).fetchall()
     participants = con.execute(
@@ -2924,7 +3088,7 @@ def serialize_task(row, con):
     ).fetchall()
     resolution_rows = con.execute(
         "SELECT id,source_type,source_id,summary,confidence,sources_json,state,source_url,created_at,decided_at "
-        "FROM task_resolution_reviews WHERE task_id=? ORDER BY id DESC LIMIT 8",
+        "FROM task_resolution_reviews WHERE task_id=? ORDER BY id DESC LIMIT 4",
         (row["id"],)
     ).fetchall()
     item = dict(row)
@@ -3477,8 +3641,14 @@ def list_sent_followups():
 @login_required
 def dismiss_sent_followup(monitor_id):
     with connect_db() as con:
-        con.execute("UPDATE sent_monitors SET state='dismissed' WHERE id=?", (monitor_id,))
-    return jsonify({"ok": True})
+        exists = con.execute("SELECT id,state FROM sent_monitors WHERE id=?", (monitor_id,)).fetchone()
+        if not exists:
+            return jsonify({"error": "Follow-up item not found."}), 404
+        con.execute(
+            "UPDATE sent_monitors SET state='dismissed',followup_due='' WHERE id=?",
+            (monitor_id,)
+        )
+    return jsonify({"ok": True, "id": monitor_id, "state": "dismissed"})
 
 
 @app.post("/api/sent-followups/<int:monitor_id>/create-task")
@@ -3890,7 +4060,7 @@ def dashboard_counts():
             "chat": con.execute(
                 """
                 SELECT COUNT(*) FROM chat_suggestions
-                WHERE state='new' AND lower(trim(space_display_name))<>'sales team to me'
+                WHERE state='new' AND lower(trim(space_display_name)) NOT IN ('sales team to me','client success')
                 """
             ).fetchone()[0],
             "meetings": con.execute(

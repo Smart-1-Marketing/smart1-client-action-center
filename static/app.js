@@ -29,7 +29,7 @@ function participantText(t){
 }
 function notesHtml(t){
   if(!t.notes?.length)return "";
-  return `<div class="log-section"><h4>Notes</h4>${t.notes.slice(0,4).map(n=>`<div class="note">${esc(n.body)}<small>${esc(n.created_at)}</small></div>`).join("")}</div>`;
+  return `<details class="log-section collapsed-log"><summary>Notes (${t.notes.length})</summary><div class="collapsed-log-body">${t.notes.slice(0,3).map(n=>`<div class="note">${esc(n.body)}<small>${esc(n.created_at)}</small></div>`).join("")}</div></details>`;
 }
 function researchLogsHtml(t){
   if(!t.research_logs?.length)return "";
@@ -40,15 +40,18 @@ function researchLogsHtml(t){
 }
 function emailUpdatesHtml(t){
   if(!t.email_updates?.length)return "";
-  return `<div class="log-section"><h4>Email Chain Updates</h4>${t.email_updates.slice(0,6).map(u=>{
+  return `<details class="log-section collapsed-log"><summary>Email Chain Updates (${t.email_updates.length})</summary><div class="collapsed-log-body">${t.email_updates.slice(0,3).map(u=>{
     const direction=(u.direction||"incoming").toUpperCase();
     const recipients=[u.to_emails?`To: ${u.to_emails}`:"",u.cc_emails?`Cc: ${u.cc_emails}`:""].filter(Boolean).join(" · ");
     return `<div class="email-update"><strong>${direction}: ${esc(u.subject||"Related email")}</strong><div>${esc(u.snippet||"")}</div><small>${esc(u.sender_name||u.sender_email)} · ${esc(u.received_at)} · ${esc(u.match_method||"")}</small>${recipients?`<small>${esc(recipients)}</small>`:""}${u.email_url?`<div class="source-links"><a href="${esc(u.email_url)}" target="_blank" rel="noopener">Open email</a></div>`:""}</div>`;
-  }).join("")}</div>`;
+  }).join("")}</div></details>`;
 }
 function chatUpdatesHtml(t){
   if(!t.chat_updates?.length)return "";
-  return `<div class="log-section"><h4>Google Chat Updates</h4>${t.chat_updates.slice(0,6).map(u=>`<div class="email-update"><strong>${esc(u.space_display_name||"Google Chat")}</strong><div>${esc(u.message_text||"")}</div><small>${esc(u.sender_display_name||"")} · ${esc(u.create_time||"")} · ${esc(u.match_method||"")}</small>${u.space_uri?`<div class="source-links"><a href="${esc(u.space_uri)}" target="_blank" rel="noopener">Open Chat</a></div>`:""}</div>`).join("")}</div>`;
+  return `<details class="log-section collapsed-log"><summary>Group Chat Updates (${t.chat_updates.length})</summary><div class="collapsed-log-body">${t.chat_updates.slice(0,3).map(u=>{
+    const direction=(u.direction||"incoming")==="outgoing"?"SENT":"CHAT";
+    return `<div class="email-update"><strong>${direction}: ${esc(u.space_display_name||"Google Chat")}</strong><div>${esc(u.message_text||"")}</div><small>${esc(u.sender_display_name||"")} · ${esc(u.create_time||"")} · ${esc(u.match_method||"")}</small>${u.space_uri?`<div class="source-links"><a href="${esc(u.space_uri)}" target="_blank" rel="noopener">Open Chat</a></div>`:""}</div>`;
+  }).join("")}</div></details>`;
 }
 function resolutionHtml(t){
   const pending=(t.resolution_reviews||[]).filter(r=>r.state==="pending");
@@ -58,11 +61,7 @@ function resolutionHtml(t){
     return `<div class="resolution-review"><div class="resolution-title">This communication may have resolved the task.</div><div>${esc(r.summary)}</div><div class="helper">${esc((r.confidence||"").toUpperCase())} confidence</div>${sources?`<div class="source-links">${sources}</div>`:""}<div class="row"><button class="button primary" data-resolution-yes="${t.id}" data-review-id="${r.id}">Yes — Complete It</button><button class="button secondary" data-resolution-no="${t.id}" data-review-id="${r.id}">No — Keep Open</button></div></div>`;
   }).join("");
 }
-function gptHelpHtml(t){
-  if(!t.gpt_can_help)return "";
-  const prepared=!!(t.gpt_help_prompt||"").trim();
-  return `<div class="gpt-help"><strong>GPT can probably help complete this task.</strong><div class="helper">${esc(t.gpt_help_reason||"This request can be prepared or solved with GPT assistance.")}</div><div class="helper">${prepared?"Prompt already prepared.":"Full prompt is generated only when you click Prepare GPT Prompt."}</div><div class="row"><button class="button primary" data-show-gpt-prompt="${t.id}">${prepared?"View GPT Prompt":"Prepare GPT Prompt"}</button><button class="button secondary" data-suppress-gpt-help="${t.id}">Don't Suggest GPT Help for This Type</button></div></div>`;
-}
+function gptHelpHtml(t){return "";}
 function paymentFields(t){
   if(t.category!=="payment")return "";
   const paid=t.completed||t.paid_at;
@@ -83,13 +82,13 @@ function actionButtons(t,history=false){
     <button class="task-action" data-deadline="${t.id}">Add Deadline</button>
     <button class="task-action" data-email-research="${t.id}">Ask Email</button>
     <button class="task-action" data-check-resolution="${t.id}">Check Resolution</button>
-    <button class="task-action" data-gpt-help="${t.id}">${t.gpt_can_help?"GPT Help":"Can GPT Help?"}</button>
+    <button class="task-action" data-gpt-help="${t.id}">GPT Help</button>
     ${t.category==="payment"?`<button class="task-action" data-payment-edit="${t.id}">Payment Info</button>`:""}
     ${invoiceBtn}
     ${t.email_url?`<a class="task-action" href="${esc(t.email_url)}" target="_blank" rel="noopener">See Email</a>`:""}
     ${t.chat_space_uri?`<a class="task-action" href="${esc(t.chat_space_uri)}" target="_blank" rel="noopener">See Chat</a>`:""}
     ${t.chat_space_name?`<button class="task-action" data-chat-reply="${t.id}">Reply in Chat</button>`:""}
-    ${["gmail","chat"].includes(t.source_kind)?`<button class="task-action not-task-button" data-live-not-task="${t.id}">Not a Task — Train Type</button>`:""}
+    ${["gmail","chat"].includes(t.source_kind)?`<button class="task-action not-task-button" data-live-not-task="${t.id}">Don't Make This a Task</button>`:""}
     <button class="task-action" data-reply="${t.id}">Prepare Reply</button>
     <button class="task-action complete" ${t.category==="payment"?`data-mark-paid="${t.id}"`:`data-complete="${t.id}"`}>${t.category==="payment"?"Mark Paid":"Complete"}</button>
   </div>`;
@@ -161,7 +160,7 @@ function renderTasks(){
 }
 function gmailSuggestionCard(s){
   const payment=s.suggested_category==="payment",multi=Number(s.recipient_count||0)>1;
-  return `<article class="suggestion"><div class="task-head"><div><h3>${esc(s.suggested_title||s.subject||"Gmail action")}</h3><div class="party">${esc(s.sender_name||s.sender_email)}${s.sender_email?` · ${esc(s.sender_email)}`:""}</div></div><div class="bubbles"><span class="bubble ${payment?"payment":"client"}">${payment?"PAYMENT":"CLIENT TASK"}</span>${multi?`<span class="bubble multi">MULTI-PERSON · ${s.recipient_count}</span>`:""}${s.invoice_sent?`<span class="bubble invoice">INVOICE SENT</span>`:""}${s.gpt_can_help?`<span class="bubble gpt">GPT CAN HELP</span>`:""}<span class="bubble ${esc(s.suggested_priority)}">${esc((s.suggested_priority||"normal").toUpperCase())}</span>${s.suggested_due_date?`<span class="bubble future">Due ${esc(s.suggested_due_date)}</span>`:`<span class="bubble no-due">No deadline</span>`}</div></div><div class="ai-summary">${esc(s.suggested_summary||s.snippet||"")}</div>${payment?`<div class="payment-box"><div class="payment-field"><span>Amount</span><strong>${money(s.payment_amount,s.currency)}</strong></div><div class="payment-field"><span>Invoice #</span><strong>${esc(s.invoice_number||"—")}</strong></div><div class="payment-field"><span>Invoice Sent</span><strong>${s.invoice_sent?"Yes":"No"}</strong></div></div>`:""}${s.gpt_can_help?`<div class="helper">GPT help: ${esc(s.gpt_help_reason||"")}</div>`:""}<div class="suggestion-meta"><span class="confidence">${esc((s.confidence||"").toUpperCase())} confidence</span> · ${esc(s.reason||"")} · Analyzer: ${esc(s.analyzer||"")}</div><div class="row"><button class="button primary" data-approve="${s.id}">Approve</button><a class="button secondary" href="${esc(s.email_url)}" target="_blank" rel="noopener">See Email</a>${s.gpt_can_help?`<button class="button secondary" data-suppress-gpt-suggestion="${s.id}">Don't Suggest GPT Help for This Type</button>`:""}<button class="button not-task-button" data-not-task="${s.id}">Not a Task — Train</button><button class="button secondary" data-dismiss="${s.id}">Dismiss</button></div></article>`;
+  return `<article class="suggestion"><div class="task-head"><div><h3>${esc(s.suggested_title||s.subject||"Gmail action")}</h3><div class="party">${esc(s.sender_name||s.sender_email)}${s.sender_email?` · ${esc(s.sender_email)}`:""}</div></div><div class="bubbles"><span class="bubble ${payment?"payment":"client"}">${payment?"PAYMENT":"CLIENT TASK"}</span>${multi?`<span class="bubble multi">MULTI-PERSON · ${s.recipient_count}</span>`:""}${s.invoice_sent?`<span class="bubble invoice">INVOICE SENT</span>`:""}${s.gpt_can_help?`<span class="bubble gpt">GPT CAN HELP</span>`:""}<span class="bubble ${esc(s.suggested_priority)}">${esc((s.suggested_priority||"normal").toUpperCase())}</span>${s.suggested_due_date?`<span class="bubble future">Due ${esc(s.suggested_due_date)}</span>`:`<span class="bubble no-due">No deadline</span>`}</div></div><div class="ai-summary">${esc(s.suggested_summary||s.snippet||"")}</div>${payment?`<div class="payment-box"><div class="payment-field"><span>Amount</span><strong>${money(s.payment_amount,s.currency)}</strong></div><div class="payment-field"><span>Invoice #</span><strong>${esc(s.invoice_number||"—")}</strong></div><div class="payment-field"><span>Invoice Sent</span><strong>${s.invoice_sent?"Yes":"No"}</strong></div></div>`:""}<div class="suggestion-meta"><span class="confidence">${esc((s.confidence||"").toUpperCase())} confidence</span> · ${esc(s.reason||"")} · Analyzer: ${esc(s.analyzer||"")}</div><div class="row"><button class="button primary" data-approve="${s.id}">Approve</button><a class="button secondary" href="${esc(s.email_url)}" target="_blank" rel="noopener">See Email</a><button class="button not-task-button" data-not-task="${s.id}">Not a Task — Train</button><button class="button secondary" data-dismiss="${s.id}">Dismiss</button></div></article>`;
 }
 function renderGmailSuggestions(){el("suggestionList").innerHTML=state.gmailSuggestions.length?state.gmailSuggestions.map(gmailSuggestionCard).join(""):`<div class="panel">No new Gmail items waiting for review.</div>`}
 function chatSuggestionCard(s){
@@ -245,8 +244,8 @@ function renderChatDiagnostics(d){
     <div class="table-wrap"><table class="diagnostic-table"><thead><tr><th>Space</th><th>Type</th><th>Recent sample</th><th>Error</th></tr></thead><tbody>${(d.sampled_spaces||[]).map(diagnosticSpaceRow).join("")}</tbody></table></div>`;
 }
 async function runChatDiagnostics(){
-  el("runChatDiagnostics").disabled=true;
-  el("runChatDiagnostics").textContent="Checking…";
+  el("checkChat").disabled=true;
+  el("checkChat").textContent="Checking…";
   el("chatDiagnosticsBody").innerHTML=`<div class="helper">Testing scopes, spaces, and recent messages directly with Google Chat…</div>`;
   try{
     const d=await api("/api/chat/diagnostics");
@@ -254,8 +253,8 @@ async function runChatDiagnostics(){
   }catch(err){
     el("chatDiagnosticsBody").innerHTML=`<div class="diagnostic-errors"><strong>Chat check failed</strong><div>${esc(err.message)}</div></div>`;
   }finally{
-    el("runChatDiagnostics").disabled=false;
-    el("runChatDiagnostics").textContent="Run Chat Check";
+    el("checkChat").disabled=false;
+    el("checkChat").textContent="Check Chat";
   }
 }
 
@@ -302,7 +301,7 @@ el("clearQuickFilter").addEventListener("click",()=>{state.quickFilter="";render
 
 // Task actions.
 el("taskList").addEventListener("click",async e=>{
-  const b=e.target.closest("[data-status],[data-note],[data-deadline],[data-email-research],[data-check-resolution],[data-gpt-help],[data-show-gpt-prompt],[data-suppress-gpt-help],[data-payment-edit],[data-invoice-toggle],[data-reply],[data-chat-reply],[data-live-not-task],[data-mark-paid],[data-complete],[data-restore],[data-delete],[data-resolution-yes],[data-resolution-no]");if(!b)return;
+  const b=e.target.closest("[data-status],[data-note],[data-deadline],[data-email-research],[data-check-resolution],[data-gpt-help],[data-payment-edit],[data-invoice-toggle],[data-reply],[data-chat-reply],[data-live-not-task],[data-mark-paid],[data-complete],[data-restore],[data-delete],[data-resolution-yes],[data-resolution-no]");if(!b)return;
   const key=Object.keys(b.dataset)[0],id=Number(b.dataset[key]),t=getTask(id);if(!t)return;
   if(key==="status")showPanel(id,`<label>Status<select id="statusInput-${id}">${["Open","Working","Waiting","Blocked"].map(s=>`<option ${s===t.status?"selected":""}>${s}</option>`).join("")}</select></label><div class="row"><button class="button primary" data-save-status="${id}">Save Status</button></div>`);
   if(key==="note")showPanel(id,`<label>Create Note<textarea id="noteInput-${id}" rows="3" placeholder="Add update, owner, promise, payment confirmation or next step..."></textarea></label><div class="row"><button class="button primary" data-save-note="${id}">Save Note</button></div>`);
@@ -311,25 +310,23 @@ el("taskList").addEventListener("click",async e=>{
   if(key==="paymentEdit")showPanel(id,`<div class="formgrid"><label>Amount<input id="amountInput-${id}" type="number" min="0" step="0.01" value="${Number(t.amount||0)}"></label><label>Invoice #<input id="invoiceInput-${id}" value="${esc(t.invoice_number||"")}"></label></div><div class="row"><button class="button primary" data-save-payment="${id}">Save Payment Info</button></div>`);
   if(key==="invoiceToggle"){await api(`/api/tasks/${id}`,{method:"PATCH",body:JSON.stringify({invoice_sent:!t.invoice_sent})});await load()}
   if(key==="checkResolution"){b.disabled=true;showPanel(id,`<div class="helper">Reviewing the attached email/chat chain for a possible resolution…</div>`);try{const r=await api(`/api/tasks/${id}/check-resolution`,{method:"POST"});if(r.assessment?.likely_resolved){await load()}else showPanel(id,`<div>No clear resolution yet.</div><div class="helper">${esc(r.assessment?.reason||"The communication does not appear to complete the task.")}</div>`)}catch(err){showPanel(id,`<div class="helper">${esc(err.message)}</div>`)}finally{b.disabled=false}}
-  if(key==="gptHelp"){b.disabled=true;showPanel(id,`<div class="helper">Checking whether GPT can materially help complete this task…</div>`);try{const r=await api(`/api/tasks/${id}/gpt-help`,{method:"POST"});if(r.can_help){showPanel(id,`<div class="gpt-help"><strong>Yes — GPT can help.</strong><div>${esc(r.reason||"")}</div><label>Ready-to-use prompt<textarea rows="9">${esc(r.prompt||"")}</textarea></label></div>`)}else showPanel(id,`<div>GPT is not a good fit for completing this task directly.</div><div class="helper">${esc(r.reason||"")}</div>`)}catch(err){showPanel(id,`<div class="helper">${esc(err.message)}</div>`)}finally{b.disabled=false}}
-  if(key==="showGptPrompt"){
+  if(key==="gptHelp"){
     if((t.gpt_help_prompt||"").trim()){
-      showPanel(id,`<div class="gpt-help"><strong>Prepared GPT Prompt</strong><div class="helper">${esc(t.gpt_help_reason||"")}</div><textarea rows="10">${esc(t.gpt_help_prompt||"")}</textarea></div>`);
+      showPanel(id,`<div class="gpt-help"><textarea rows="9">${esc(t.gpt_help_prompt||"")}</textarea></div>`);
     }else{
-      b.disabled=true;showPanel(id,`<div class="helper">Preparing the prompt with OpenAI…</div>`);
+      b.disabled=true;
+      showPanel(id,`<div class="helper">Preparing GPT help…</div>`);
       try{
         const r=await api(`/api/tasks/${id}/gpt-help`,{method:"POST"});
-        if(r.can_help)showPanel(id,`<div class="gpt-help"><strong>Prepared GPT Prompt</strong><div class="helper">${esc(r.reason||"")}</div><textarea rows="10">${esc(r.prompt||"")}</textarea></div>`);
-        else showPanel(id,`<div>GPT is not a good fit for completing this task directly.</div><div class="helper">${esc(r.reason||"")}</div>`);
+        showPanel(id,r.can_help&&r.prompt
+          ?`<div class="gpt-help"><textarea rows="9">${esc(r.prompt||"")}</textarea></div>`
+          :`<div class="helper">No GPT prompt was prepared for this task.</div>`);
         await load();
-      }catch(err){showPanel(id,`<div class="helper">${esc(err.message)}</div>`)}
-      finally{b.disabled=false}
-    }
-  }
-  if(key==="suppressGptHelp"){
-    if(confirm("Stop suggesting GPT help for future emails of this same type?")){
-      await api(`/api/tasks/${id}/gpt-help/suppress`,{method:"POST"});
-      await load();
+      }catch(err){
+        showPanel(id,`<div class="helper">${esc(err.message)}</div>`);
+      }finally{
+        b.disabled=false;
+      }
     }
   }
   if(key==="reply"){state.currentReply=t;el("replyTo").value=t.email_to||"";el("replySubject").value=t.email_subject||`Re: ${t.title}`;el("replyBody").value=t.suggested_reply||`Hi,\n\nI wanted to follow up regarding ${t.title.toLowerCase()}.\n\n[INSERT CURRENT UPDATE]\n\nPlease let me know if you need anything further from us.\n\nThanks,\nTodd`;el("replyStatus").textContent="";el("openReplySource").classList.toggle("hidden",!(t.email_url||t.chat_space_uri));if(t.email_url||t.chat_space_uri)el("openReplySource").href=t.email_url||t.chat_space_uri;updateCompose();el("replyDialog").showModal()}
@@ -359,7 +356,7 @@ el("taskList").addEventListener("click",async e=>{
   if(key==="resolutionYes"||key==="resolutionNo"){const reviewId=Number(b.dataset.reviewId),resolved=key==="resolutionYes";await api(`/api/tasks/${id}/resolution/${reviewId}`,{method:"POST",body:JSON.stringify({resolved})});await load()}
 });
 el("taskList").addEventListener("click",async e=>{
-  const b=e.target.closest("[data-save-status],[data-save-note],[data-save-deadline],[data-save-payment,[data-confirm-paid]],[data-run-research]");if(!b)return;
+  const b=e.target.closest("[data-save-status],[data-save-note],[data-save-deadline],[data-save-payment],[data-confirm-paid],[data-run-research]");if(!b)return;
   if(b.dataset.saveStatus){const id=Number(b.dataset.saveStatus);await api(`/api/tasks/${id}`,{method:"PATCH",body:JSON.stringify({status:el(`statusInput-${id}`).value})});await load()}
   if(b.dataset.saveNote){const id=Number(b.dataset.saveNote),body=el(`noteInput-${id}`).value.trim();if(body){await api(`/api/tasks/${id}/notes`,{method:"POST",body:JSON.stringify({body})});await load()}}
   if(b.dataset.saveDeadline){const id=Number(b.dataset.saveDeadline);await api(`/api/tasks/${id}`,{method:"PATCH",body:JSON.stringify({due_date:el(`deadlineInput-${id}`).value})});await load()}
@@ -377,11 +374,38 @@ el("taskList").addEventListener("click",async e=>{
 });
 
 // Gmail review.
-el("suggestionList").addEventListener("click",async e=>{const approve=e.target.closest("[data-approve]"),suppress=e.target.closest("[data-suppress-gpt-suggestion]"),train=e.target.closest("[data-not-task]"),dismiss=e.target.closest("[data-dismiss]");if(approve){await api(`/api/gmail/suggestions/${approve.dataset.approve}/approve`,{method:"POST",body:"{}"});await load()}if(suppress){if(confirm("Stop suggesting GPT help for future emails of this same type?")){await api(`/api/gmail/suggestions/${suppress.dataset.suppressGptSuggestion}/gpt-help/suppress`,{method:"POST"});await load()}}if(train){train.disabled=true;train.textContent="Training…";try{await api(`/api/gmail/suggestions/${train.dataset.notTask}/not-task`,{method:"POST",body:JSON.stringify({reason:"Marked Not a Task from Gmail Review"})});await load()}catch(err){alert(err.message);train.disabled=false;train.textContent="Not a Task — Train"}}if(dismiss){await api(`/api/gmail/suggestions/${dismiss.dataset.dismiss}/dismiss`,{method:"POST"});await load()}});
+el("suggestionList").addEventListener("click",async e=>{const approve=e.target.closest("[data-approve]"),train=e.target.closest("[data-not-task]"),dismiss=e.target.closest("[data-dismiss]");if(approve){await api(`/api/gmail/suggestions/${approve.dataset.approve}/approve`,{method:"POST",body:"{}"});await load()}if(train){train.disabled=true;train.textContent="Training…";try{await api(`/api/gmail/suggestions/${train.dataset.notTask}/not-task`,{method:"POST",body:JSON.stringify({reason:"Marked Not a Task from Gmail Review"})});await load()}catch(err){alert(err.message);train.disabled=false;train.textContent="Not a Task — Train"}}if(dismiss){await api(`/api/gmail/suggestions/${dismiss.dataset.dismiss}/dismiss`,{method:"POST"});await load()}});
 // Chat review.
 el("chatSuggestionList").addEventListener("click",async e=>{const approve=e.target.closest("[data-chat-approve]"),train=e.target.closest("[data-chat-not-task]"),dismiss=e.target.closest("[data-chat-dismiss]");if(approve){await api(`/api/chat/suggestions/${approve.dataset.chatApprove}/approve`,{method:"POST"});await load()}if(train){train.disabled=true;train.textContent="Training…";try{await api(`/api/chat/suggestions/${train.dataset.chatNotTask}/not-task`,{method:"POST",body:JSON.stringify({reason:"Marked Not a Task from Chat Review"})});await load()}catch(err){alert(err.message);train.disabled=false;train.textContent="Not a Task — Train"}}if(dismiss){await api(`/api/chat/suggestions/${dismiss.dataset.chatDismiss}/dismiss`,{method:"POST"});await load()}});
 // Sent follow-ups.
-el("sentList").addEventListener("click",async e=>{const create=e.target.closest("[data-sent-create-task]"),dismiss=e.target.closest("[data-sent-dismiss]"),open=e.target.closest("[data-open-linked-task]");if(create){await api(`/api/sent-followups/${create.dataset.sentCreateTask}/create-task`,{method:"POST"});await load();state.tab="client";updateViews()}if(dismiss){await api(`/api/sent-followups/${dismiss.dataset.sentDismiss}/dismiss`,{method:"POST"});await load()}if(open){state.tab="client";state.quickFilter="";el("search").value="";updateViews();setTimeout(()=>{const node=el(`task-${open.dataset.openLinkedTask}`);if(node)node.scrollIntoView({behavior:"smooth",block:"start"})},100)}});
+el("sentList").addEventListener("click",async e=>{
+  const create=e.target.closest("[data-sent-create-task]"),dismiss=e.target.closest("[data-sent-dismiss]"),open=e.target.closest("[data-open-linked-task]");
+  if(create){
+    await api(`/api/sent-followups/${create.dataset.sentCreateTask}/create-task`,{method:"POST"});
+    await load();state.tab="client";updateViews();
+  }
+  if(dismiss){
+    const id=Number(dismiss.dataset.sentDismiss);
+    const previous=[...state.sentFollowups];
+    dismiss.disabled=true;
+    state.sentFollowups=state.sentFollowups.filter(x=>Number(x.id)!==id);
+    renderSent();
+    try{
+      await api(`/api/sent-followups/${id}/dismiss`,{method:"POST"});
+      if(state.counts&&Number.isFinite(Number(state.counts.sent)))state.counts.sent=Math.max(0,Number(state.counts.sent)-1);
+      renderMetrics();
+    }catch(err){
+      state.sentFollowups=previous;
+      renderSent();
+      alert(`Could not dismiss follow-up: ${err.message}`);
+    }
+  }
+  if(open){
+    state.tab="client";state.quickFilter="";el("search").value="";
+    await loadTabData("client");updateViews();
+    setTimeout(()=>{const node=el(`task-${open.dataset.openLinkedTask}`);if(node)node.scrollIntoView({behavior:"smooth",block:"start"})},100);
+  }
+});
 // Meeting recap review.
 el("meetingList").addEventListener("click",async e=>{const add=e.target.closest("[data-meeting-add]"),dismiss=e.target.closest("[data-meeting-dismiss]");if(add){const id=Number(add.dataset.meetingAdd),selected=[...document.querySelectorAll(`[data-meeting-task="${id}"]:checked`)].map(cb=>{const index=Number(cb.dataset.taskIndex),input=document.querySelector(`[data-meeting-assignee="${id}"][data-task-index="${index}"]`);return{index,assignee:input?.value.trim()||""}});if(!selected.length)return;const status=el(`meeting-status-${id}`);add.disabled=true;status.textContent="Adding selected meeting tasks…";try{const r=await api(`/api/meetings/reviews/${id}/add`,{method:"POST",body:JSON.stringify({tasks:selected})});status.textContent=`Added ${r.added} task(s).`;await load();state.tab="client";updateViews()}catch(err){status.textContent=err.message}finally{add.disabled=false}}if(dismiss){await api(`/api/meetings/reviews/${dismiss.dataset.meetingDismiss}/dismiss`,{method:"POST"});await load()}});
 

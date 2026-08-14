@@ -169,3 +169,54 @@ After deploy:
 4. Settings contains Watch Domains and Dark/Light mode.
 5. `Sales Team to Me` should disappear from active Chat review/tasks.
 6. Gmail/Chat live tasks should show **Not a Task — Train Type**.
+## Lean Memory + Cleanup release
+
+Replace:
+```text
+app.py
+static/app.js
+static/style.css
+templates/index.html
+render.yaml
+requirements.txt
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Keep:
+```text
+.python-version
+/var/data/tasks.db
+```
+
+After deploy:
+1. Render should build without installing the `openai` Python package.
+2. Sent-mail analysis should no longer include Todd's signature.
+3. `Sales Team to Me` should stay excluded.
+4. `QuickBooks Payments` should disappear from active task/review/follow-up areas.
+5. GPT task areas should show buttons only.
+6. Notes and Email Chain Updates should be collapsed until clicked.
+7. Gmail/Chat-created tasks should show **Don't Make This a Task**.
+8. **Dismiss Follow-up** should remove the card immediately.
+9. Watch Render memory through at least two full sync cycles.
+## Button audit + Group Chat update
+
+Replace:
+```text
+app.py
+static/app.js
+static/style.css
+templates/index.html
+README.md
+UPGRADE_CHECKLIST.md
+BUTTON_AUDIT.md
+BUTTON_AUDIT.json
+```
+
+Keep:
+```text
+render.yaml
+requirements.txt
+.python-version
+/var/data/tasks.db
+```

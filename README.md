@@ -526,3 +526,85 @@ browser/server response memory on every refresh.
 
 The communications sync also runs garbage collection between Gmail, meeting, Sent,
 and Chat phases.
+## Lean memory + filtering cleanup
+
+### OpenAI runtime memory
+The application no longer imports the OpenAI Python SDK in the Render web process.
+It calls the Responses API directly over a small standard-library HTTPS request while
+preserving the same JSON Schema structured-output behavior.
+
+`openai` was removed from `requirements.txt`.
+
+### Sent signature exclusion
+Before any Sent-mail task/follow-up/resolution analysis, the parser removes Todd's known
+signature block when it contains all of these fingerprints:
+
+```text
+Todd Swickard
+Chief Executive Officer
+todd@smart1marketing.com
+614-342-0814
+Please use Smart 1 Team
+```
+
+This covers both the long signature containing the social/link labels and the shorter signature.
+
+### Hard ignores
+The following are permanent ignores:
+- Gmail domain `xwf.google.com`
+- Google Chat space `Sales Team to Me`
+- sender/display source `QuickBooks Payments`
+- Google Chat space `QuickBooks Payments`
+
+Existing open QuickBooks Payments tasks are moved to Completed, queued suggestions are
+removed, and existing QuickBooks Payments Sent follow-up monitors are dismissed.
+
+### GPT task UI
+When GPT is known to help, the task now shows only:
+- Prepare/View GPT Prompt
+- Don't Suggest GPT Help for This Type
+
+The explanatory paragraph and "Prompt already prepared" text are removed.
+
+### Notes and email chain
+Notes and Email Chain Updates are collapsed by default. Click their heading to expand them.
+
+### Don't Make This a Task
+The live-task training button is labeled:
+
+```text
+Don't Make This a Task
+```
+
+It removes the current Gmail/Chat-created task from the open list while preserving it in history
+and storing it as a negative training example for similar future communications.
+
+### Dismiss Follow-up
+Dismiss Follow-up now removes the card immediately in the browser and then confirms the state
+change with the server. If the server returns an error, the card is restored and the exact error
+is displayed.
+
+### Additional memory controls
+- lower per-sync AI analysis batch sizes
+- lower Sent/Chat batch sizes
+- lower AI context/body character budgets
+- smaller nested task activity payloads
+- `malloc_trim(0)` after heavy communication-sync phases
+- `MALLOC_ARENA_MAX=2`
+- `MALLOC_TRIM_THRESHOLD_=131072`
+
+The 30-day automatic lookback remains unchanged.
+## Button audit + compact task menu
+
+Task cards now contain a single **GPT Help** action. The separate GPT prompt/suppression
+controls have been removed from the task card and Gmail Review UI.
+
+Task-action buttons use a smaller 12px font and tighter spacing to better match the main tabs.
+
+`Client Success` is now a hard-ignored Google Chat space, alongside `Sales Team to Me`
+and `QuickBooks Payments`.
+
+Task-related Chat history now appears in a collapsed **Group Chat Updates** section,
+matching the behavior of **Email Chain Updates**.
+
+See `BUTTON_AUDIT.md` and `BUTTON_AUDIT.json` for the static button/route validation results.

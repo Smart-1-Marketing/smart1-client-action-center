@@ -1,0 +1,198 @@
+{
+  "python_syntax": "PASS",
+  "javascript_syntax": "PASS",
+  "dom_id_lookups_checked": 93,
+  "dom_id_missing": [],
+  "critical_buttons_checked": 30,
+  "critical_button_results": [
+    {
+      "button": "Ask Gmail",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Sync",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Settings",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Diagnostics",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Check Chat",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Watch Domains",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Dark/Light",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "GPT Help",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Status",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Create Note",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Add Deadline",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Ask Email",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Check Resolution",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Payment Info",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Invoice Toggle",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Reply in Chat",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Don't Make This a Task",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Prepare Reply",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Mark Paid",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Complete",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Dismiss Follow-up",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Create Follow-up Task",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Gmail Approve",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Gmail Not a Task",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Gmail Dismiss",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Chat Approve",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Chat Not a Task",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Chat Dismiss",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Meeting Add",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    },
+    {
+      "button": "Meeting Dismiss",
+      "rendered": true,
+      "handler": true,
+      "ok": true
+    }
+  ],
+  "javascript_api_paths_checked": 39,
+  "unmatched_api_paths": [],
+  "required_routes_checked": 9,
+  "required_routes_missing": [],
+  "dismiss_followup": "PASS",
+  "single_gpt_help_button": "PASS",
+  "obsolete_gpt_controls": "REMOVED",
+  "group_chat_updates_collapsed": "PASS",
+  "client_success_ignored": "PASS"
+}
