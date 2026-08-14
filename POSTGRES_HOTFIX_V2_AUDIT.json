@@ -1,0 +1,11 @@
+{
+  "exact_render_error": "psycopg ProgrammingError invalid %/@ placeholder",
+  "xwf_like_pattern_parameterized": "PASS",
+  "translator_literal_percent_escape": "PASS",
+  "resultless_row_factory": "PASS",
+  "max_to_greatest": "PASS",
+  "python_syntax": "PASS",
+  "javascript_syntax": "PASS",
+  "literal_sql_statements_audited": 209,
+  "invalid_translated_placeholders": 0
+}

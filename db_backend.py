@@ -88,9 +88,12 @@ def using_postgres():
 
 
 def _replace_qmark_placeholders(sql):
-    # SQL in this app uses parameters for data values, so '?' tokens in SQL text
-    # are placeholders and can be safely translated to psycopg's %s.
-    return sql.replace("?", "%s")
+    # All application SQL is authored with SQLite '?' placeholders.
+    # PgConnection always invokes psycopg execute() with a parameter sequence,
+    # so literal percent signs in the SQL text must be escaped as '%%' first.
+    # (Bound VALUES may contain '%' normally; they are not part of the SQL text.)
+    escaped = sql.replace("%", "%%")
+    return escaped.replace("?", "%s")
 
 
 def translate_sql(sql):
@@ -143,6 +146,35 @@ def translate_sql(sql):
             statement = statement.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
 
     return _replace_qmark_placeholders(statement)
+
+
+def validate_psycopg_placeholders(sql):
+    """Return invalid %-placeholder positions after translation.
+
+    Psycopg classic queries accept %% (literal percent) plus %s/%b/%t and
+    named %(...) placeholders. This app generates positional %s placeholders.
+    """
+    invalid = []
+    i = 0
+    while i < len(sql):
+        if sql[i] != "%":
+            i += 1
+            continue
+        if i + 1 >= len(sql):
+            invalid.append((i, "%<end>"))
+            break
+        nxt = sql[i + 1]
+        if nxt in {"%", "s", "b", "t"}:
+            i += 2
+            continue
+        if nxt == "(":
+            close = sql.find(")", i + 2)
+            if close != -1 and close + 1 < len(sql) and sql[close + 1] in {"s", "b", "t"}:
+                i = close + 2
+                continue
+        invalid.append((i, sql[i:i+8]))
+        i += 1
+    return invalid
 
 
 class EmptyCursor:

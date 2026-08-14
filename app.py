@@ -609,9 +609,10 @@ def init_db():
             """
             UPDATE gmail_suggestions
             SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
-            WHERE lower(sender_email) LIKE '%@xwf.google.com'
+            WHERE lower(sender_email) LIKE ?
               AND state='new'
-            """
+            """,
+            ("%@xwf.google.com",)
         )
 
         con.execute(
