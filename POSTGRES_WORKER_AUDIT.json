@@ -1,0 +1,14 @@
+{
+  "python_syntax": "PASS",
+  "javascript_syntax": "PASS",
+  "postgres_sql_translation": "PASS",
+  "sqlite_fallback": "PRESERVED",
+  "sqlite_to_postgres_migration": "IMPLEMENTED",
+  "postgres_connection_pool_url": "CONFIGURED",
+  "background_worker": "IMPLEMENTED",
+  "manual_sync_queue": "IMPLEMENTED",
+  "worker_startup_30_day_sync": "IMPLEMENTED",
+  "web_background_sync": "DISABLED_IN_RENDER",
+  "mobile_ui": "PRESERVED",
+  "dom_ids_checked": 95
+}

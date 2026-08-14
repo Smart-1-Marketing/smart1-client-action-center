@@ -621,3 +621,20 @@ Mobile layout uses a sticky header, scrollable tabs, 42px touch targets, a horiz
 task-action tray, full-screen dialogs, iPhone safe-area support, and 16px form controls.
 
 Invoice Register task actions now use the same shared task lookup correctly.
+
+
+## PostgreSQL + Background Worker architecture
+
+The production configuration now supports Render Postgres through `DATABASE_URL`.
+
+When `DATABASE_URL` exists:
+- dashboard reads/writes PostgreSQL
+- manual Sync is queued in `sync_jobs`
+- Gmail/Sent/Chat/OpenAI work runs in `worker.py`
+- web-service background scanning is disabled
+- an existing SQLite Render disk can be migrated one time
+
+See `POSTGRES_MIGRATION.md`.
+
+The included `render.yaml` is the migration-phase Blueprint.
+After migration, use the contents of `render-postgres-final.yaml`.

@@ -240,3 +240,28 @@ requirements.txt
 .python-version
 /var/data/tasks.db
 ```
+
+
+## PostgreSQL + Worker release
+
+Replace/add:
+
+```text
+app.py
+db_backend.py
+worker.py
+requirements.txt
+render.yaml
+render-postgres-final.yaml
+POSTGRES_MIGRATION.md
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Also keep the mobile/UI files from this package.
+
+For the FIRST deployment keep the existing `/var/data` disk attached because it is the
+source for the automatic SQLite -> PostgreSQL migration.
+
+Do not switch to the final no-disk Blueprint until the dashboard confirms your existing data
+is present in PostgreSQL.

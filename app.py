@@ -23,6 +23,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from db_backend import connect_db as backend_connect_db, using_postgres, migrate_sqlite_to_postgres_if_needed
+
 app = Flask(__name__)
 # Honor Render's X-Forwarded-Proto/X-Forwarded-Host so externally generated
 # OAuth URLs use the public HTTPS address.
@@ -132,15 +134,7 @@ SEED_TASKS = [
 
 
 def connect_db():
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA synchronous = NORMAL")
-    con.execute("PRAGMA cache_size = -4000")
-    con.execute("PRAGMA temp_store = FILE")
-    con.execute("PRAGMA mmap_size = 0")
-    return con
+    return backend_connect_db(DB_PATH)
 
 
 def column_names(con, table):
@@ -491,6 +485,22 @@ def init_db():
         ]:
             ensure_column(con, "task_resolution_reviews", definition)
 
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS sync_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                state TEXT NOT NULL DEFAULT 'queued',
+                requested_by TEXT DEFAULT 'manual',
+                requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                started_at TEXT DEFAULT '',
+                finished_at TEXT DEFAULT '',
+                result_json TEXT DEFAULT '{}',
+                error TEXT DEFAULT ''
+            )
+        """)
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sync_jobs_state ON sync_jobs(state,id)"
+        )
+
         if con.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0:
             con.executemany("""
                 INSERT INTO tasks
@@ -682,6 +692,13 @@ def init_db():
 
 
 init_db()
+
+# First PostgreSQL deployment only: the web service can see the old Render disk,
+# so it performs the one-time SQLite -> Postgres copy before accepting traffic.
+if using_postgres() and os.environ.get("MIGRATE_SQLITE_TO_POSTGRES", "0") == "1":
+    migration_result = migrate_sqlite_to_postgres_if_needed(DB_PATH)
+    if migration_result.get("completed"):
+        print(f"SQLite -> PostgreSQL migration completed: {migration_result.get('tables', {})}")
 
 
 def get_setting(key, default=""):
@@ -3254,7 +3271,9 @@ def linux_memory_status():
 @app.get("/api/diagnostics/memory")
 @login_required
 def memory_diagnostics():
-    return jsonify(linux_memory_status())
+    status = linux_memory_status()
+    status["database_backend"] = "postgresql" if using_postgres() else "sqlite"
+    return jsonify(status)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -3528,6 +3547,38 @@ def gmail_sync_endpoint():
 @app.post("/api/communications/sync")
 @login_required
 def communications_sync_endpoint():
+    if using_postgres():
+        with connect_db() as con:
+            existing = con.execute(
+                """
+                SELECT id,state FROM sync_jobs
+                WHERE state IN ('queued','running')
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if existing:
+                return jsonify({
+                    "busy": True,
+                    "running": True,
+                    "job_id": existing["id"],
+                    "message": "A communications sync is already queued or running.",
+                }), 202
+
+            cur = con.execute(
+                """
+                INSERT INTO sync_jobs(state,requested_by)
+                VALUES('queued','dashboard')
+                """
+            )
+            job_id = cur.lastrowid
+        return jsonify({
+            "started": True,
+            "running": True,
+            "job_id": job_id,
+            "message": "Sync queued for the communications worker.",
+        }), 202
+
+    # SQLite fallback/local mode.
     with MANUAL_SYNC_STATE_LOCK:
         if MANUAL_SYNC_STATE["running"]:
             return jsonify({
@@ -3554,6 +3605,34 @@ def communications_sync_endpoint():
 @app.get("/api/communications/sync/status")
 @login_required
 def communications_sync_status():
+    if using_postgres():
+        with connect_db() as con:
+            job = con.execute(
+                "SELECT * FROM sync_jobs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if not job:
+            return jsonify({
+                "running": False,
+                "started_at": "",
+                "finished_at": "",
+                "error": "",
+                "result": {},
+            })
+        try:
+            result = json.loads(job["result_json"] or "{}")
+        except Exception:
+            result = {}
+        return jsonify({
+            "job_id": job["id"],
+            "running": job["state"] in {"queued", "running"},
+            "queued": job["state"] == "queued",
+            "state": job["state"],
+            "started_at": job["started_at"],
+            "finished_at": job["finished_at"],
+            "error": job["error"],
+            "result": result,
+        })
+
     with MANUAL_SYNC_STATE_LOCK:
         return jsonify(dict(MANUAL_SYNC_STATE))
 

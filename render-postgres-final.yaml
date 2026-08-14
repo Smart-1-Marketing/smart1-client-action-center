@@ -25,7 +25,7 @@ services:
       - key: DATA_DIR
         value: /var/data
       - key: MIGRATE_SQLITE_TO_POSTGRES
-        value: "1"
+        value: "0"
       - key: DISABLE_BACKGROUND_GMAIL_SYNC
         value: "1"
       - key: APP_MEMORY_LIMIT_MB
@@ -80,13 +80,6 @@ services:
         value: "90"
       - key: AI_CONTEXT_CHAR_BUDGET
         value: "45000"
-    # KEEP THIS DISK FOR THE FIRST POSTGRES DEPLOY ONLY.
-    # The web process reads /var/data/tasks.db once and migrates it to Postgres.
-    disk:
-      name: smart1-action-data
-      mountPath: /var/data
-      sizeGB: 1
-
   - type: worker
     name: smart1-action-center-worker
     runtime: python
