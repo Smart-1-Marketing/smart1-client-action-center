@@ -11,6 +11,8 @@ services:
     envVars:
       - key: DATA_DIR
         value: /var/data
+      - key: APP_MEMORY_LIMIT_MB
+        value: "512"
       - key: MALLOC_ARENA_MAX
         value: "2"
       - key: MALLOC_TRIM_THRESHOLD_

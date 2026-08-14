@@ -1,0 +1,14 @@
+{
+  "python_syntax": "PASS",
+  "javascript_syntax": "PASS",
+  "compact_task_payloads": "PASS",
+  "lazy_task_activity": "PASS",
+  "gpt_prompt_cache": "PASS",
+  "lazy_reply_and_chat_reply": "PASS",
+  "invoice_register_actions": "PASS",
+  "memory_diagnostics": "PASS",
+  "sqlite_memory_controls": "PASS",
+  "mobile_layout": "PASS",
+  "dom_ids_checked": 95,
+  "api_paths_checked": 41
+}

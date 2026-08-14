@@ -220,3 +220,23 @@ requirements.txt
 .python-version
 /var/data/tasks.db
 ```
+## Mobile + Memory Efficiency update
+
+Replace:
+```text
+app.py
+static/app.js
+static/style.css
+templates/index.html
+render.yaml
+README.md
+UPGRADE_CHECKLIST.md
+MOBILE_MEMORY_AUDIT.json
+```
+
+Keep:
+```text
+requirements.txt
+.python-version
+/var/data/tasks.db
+```

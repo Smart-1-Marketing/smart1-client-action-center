@@ -608,3 +608,16 @@ Task-related Chat history now appears in a collapsed **Group Chat Updates** sect
 matching the behavior of **Email Chain Updates**.
 
 See `BUTTON_AUDIT.md` and `BUTTON_AUDIT.json` for the static button/route validation results.
+## Mobile + Memory Efficiency
+
+Hidden Notes, Email Chain Updates, Group Chat Updates, Email Research history,
+stored GPT prompts, and suggested reply drafts are no longer carried with every task list row.
+They load only when opened or used.
+
+Diagnostics now shows current/peak Render memory and SQLite database size.
+SQLite uses a small cache, file-backed temp storage, disabled mmap, and query indexes.
+
+Mobile layout uses a sticky header, scrollable tabs, 42px touch targets, a horizontal
+task-action tray, full-screen dialogs, iPhone safe-area support, and 16px form controls.
+
+Invoice Register task actions now use the same shared task lookup correctly.

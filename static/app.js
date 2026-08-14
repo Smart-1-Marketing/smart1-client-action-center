@@ -1,7 +1,7 @@
 const state={
   tab:"client", client:[], payment:[], invoice:[], history:[], gmailSuggestions:[], chatSuggestions:[],
   sentFollowups:[], meetingReviews:[], summary:{}, system:null, currentReply:null,currentChatReply:null, quickFilter:"", sentQuick:"all",
-  discoveryTasks:[], watchDomains:[], sortBy:"due", counts:{}, syncPoll:null
+  discoveryTasks:[], watchDomains:[], sortBy:"due", counts:{}, syncPoll:null, activityCache:{}
 };
 const el=id=>document.getElementById(id);
 const TODAY=new Date().toISOString().slice(0,10);
@@ -27,31 +27,66 @@ function participantText(t){
   if(!p.length)return "";
   return p.map(x=>x.display_name?`${x.display_name} <${x.email}>`:x.email).join(", ");
 }
+function activityCount(t,key,arrayKey){
+  const explicit=Number(t[key]||0);
+  if(explicit)return explicit;
+  return Array.isArray(t[arrayKey])?t[arrayKey].length:0;
+}
 function notesHtml(t){
-  if(!t.notes?.length)return "";
-  return `<details class="log-section collapsed-log"><summary>Notes (${t.notes.length})</summary><div class="collapsed-log-body">${t.notes.slice(0,3).map(n=>`<div class="note">${esc(n.body)}<small>${esc(n.created_at)}</small></div>`).join("")}</div></details>`;
+  const count=activityCount(t,"notes_count","notes");
+  if(!count)return "";
+  return `<details class="log-section collapsed-log" data-activity-task="${t.id}"><summary>Notes (${count})</summary><div class="collapsed-log-body" id="activity-notes-${t.id}"><div class="helper">Tap to load notes.</div></div></details>`;
 }
 function researchLogsHtml(t){
-  if(!t.research_logs?.length)return "";
-  return `<div class="log-section"><h4>Email Research Log</h4>${t.research_logs.slice(0,5).map(log=>{
-    const sources=(log.sources||[]).map(s=>`<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.subject||"Email")}</a>`).join(" · ");
-    return `<div class="research-log"><strong>Q: ${esc(log.question)}</strong><div>${esc(log.answer)}</div><small>${esc((log.confidence||"").toUpperCase())} confidence · ${esc(log.created_at)}</small>${sources?`<div class="source-links">${sources}</div>`:""}</div>`;
-  }).join("")}</div>`;
+  const count=activityCount(t,"research_count","research_logs");
+  if(!count)return "";
+  return `<details class="log-section collapsed-log" data-activity-task="${t.id}"><summary>Email Research Log (${count})</summary><div class="collapsed-log-body" id="activity-research-${t.id}"><div class="helper">Tap to load research history.</div></div></details>`;
 }
 function emailUpdatesHtml(t){
-  if(!t.email_updates?.length)return "";
-  return `<details class="log-section collapsed-log"><summary>Email Chain Updates (${t.email_updates.length})</summary><div class="collapsed-log-body">${t.email_updates.slice(0,3).map(u=>{
+  const count=activityCount(t,"email_updates_count","email_updates");
+  if(!count)return "";
+  return `<details class="log-section collapsed-log" data-activity-task="${t.id}"><summary>Email Chain Updates (${count})</summary><div class="collapsed-log-body" id="activity-email-${t.id}"><div class="helper">Tap to load email updates.</div></div></details>`;
+}
+function chatUpdatesHtml(t){
+  const count=activityCount(t,"chat_updates_count","chat_updates");
+  if(!count)return "";
+  return `<details class="log-section collapsed-log" data-activity-task="${t.id}"><summary>Group Chat Updates (${count})</summary><div class="collapsed-log-body" id="activity-chat-${t.id}"><div class="helper">Tap to load group chat updates.</div></div></details>`;
+}
+function activityNotesRows(rows){return rows.length?rows.map(n=>`<div class="note">${esc(n.body)}<small>${esc(n.created_at)}</small></div>`).join(""):`<div class="helper">No notes.</div>`}
+function activityResearchRows(rows){
+  return rows.length?rows.map(log=>{
+    const sources=(log.sources||[]).map(s=>`<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.subject||"Email")}</a>`).join(" · ");
+    return `<div class="research-log"><strong>Q: ${esc(log.question)}</strong><div>${esc(log.answer)}</div><small>${esc((log.confidence||"").toUpperCase())} confidence · ${esc(log.created_at)}</small>${sources?`<div class="source-links">${sources}</div>`:""}</div>`;
+  }).join(""):`<div class="helper">No research history.</div>`;
+}
+function activityEmailRows(rows){
+  return rows.length?rows.map(u=>{
     const direction=(u.direction||"incoming").toUpperCase();
     const recipients=[u.to_emails?`To: ${u.to_emails}`:"",u.cc_emails?`Cc: ${u.cc_emails}`:""].filter(Boolean).join(" · ");
     return `<div class="email-update"><strong>${direction}: ${esc(u.subject||"Related email")}</strong><div>${esc(u.snippet||"")}</div><small>${esc(u.sender_name||u.sender_email)} · ${esc(u.received_at)} · ${esc(u.match_method||"")}</small>${recipients?`<small>${esc(recipients)}</small>`:""}${u.email_url?`<div class="source-links"><a href="${esc(u.email_url)}" target="_blank" rel="noopener">Open email</a></div>`:""}</div>`;
-  }).join("")}</div></details>`;
+  }).join(""):`<div class="helper">No email updates.</div>`;
 }
-function chatUpdatesHtml(t){
-  if(!t.chat_updates?.length)return "";
-  return `<details class="log-section collapsed-log"><summary>Group Chat Updates (${t.chat_updates.length})</summary><div class="collapsed-log-body">${t.chat_updates.slice(0,3).map(u=>{
+function activityChatRows(rows){
+  return rows.length?rows.map(u=>{
     const direction=(u.direction||"incoming")==="outgoing"?"SENT":"CHAT";
     return `<div class="email-update"><strong>${direction}: ${esc(u.space_display_name||"Google Chat")}</strong><div>${esc(u.message_text||"")}</div><small>${esc(u.sender_display_name||"")} · ${esc(u.create_time||"")} · ${esc(u.match_method||"")}</small>${u.space_uri?`<div class="source-links"><a href="${esc(u.space_uri)}" target="_blank" rel="noopener">Open Chat</a></div>`:""}</div>`;
-  }).join("")}</div></details>`;
+  }).join(""):`<div class="helper">No group chat updates.</div>`;
+}
+function populateActivity(id,data){
+  const n=el(`activity-notes-${id}`);if(n)n.innerHTML=activityNotesRows(data.notes||[]);
+  const r=el(`activity-research-${id}`);if(r)r.innerHTML=activityResearchRows(data.research_logs||[]);
+  const e=el(`activity-email-${id}`);if(e)e.innerHTML=activityEmailRows(data.email_updates||[]);
+  const c=el(`activity-chat-${id}`);if(c)c.innerHTML=activityChatRows(data.chat_updates||[]);
+}
+async function ensureTaskActivity(id){
+  if(state.activityCache[id]){
+    populateActivity(id,state.activityCache[id]);
+    return state.activityCache[id];
+  }
+  const data=await api(`/api/tasks/${id}/activity`);
+  state.activityCache[id]=data;
+  populateActivity(id,data);
+  return data;
 }
 function resolutionHtml(t){
   const pending=(t.resolution_reviews||[]).filter(r=>r.state==="pending");
@@ -105,7 +140,7 @@ function taskCard(t,history=false){
     <div id="reveal-${t.id}"></div>${actionButtons(t,history)}
   </article>`;
 }
-function getTask(id){return [...state.client,...state.payment,...state.history].find(t=>t.id===Number(id))}
+function getTask(id){return [...state.client,...state.payment,...state.invoice,...state.history].find(t=>t.id===Number(id))}
 function sortTasks(rows){
   const mode=state.sortBy||"due";
   const received=t=>String(t.source_received_at||t.created_at||"");
@@ -140,7 +175,7 @@ function applyQuickFilter(rows){
 function filtered(rows){
   const q=el("search").value.toLowerCase().trim(),st=el("statusFilter").value;rows=applyQuickFilter(rows);
   return sortTasks(rows.filter(t=>{
-    const hay=`${t.party} ${t.title} ${t.detail} ${t.assignee||""} ${participantText(t)} ${(t.notes||[]).map(n=>n.body).join(" ")} ${(t.research_logs||[]).map(r=>r.question+" "+r.answer).join(" ")}`.toLowerCase();
+    const hay=`${t.party} ${t.title} ${t.detail} ${t.assignee||""} ${participantText(t)}`.toLowerCase();
     return(!q||hay.includes(q))&&(st==="all"||t.status===st);
   }));
 }
@@ -191,6 +226,20 @@ function updateViews(){
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("active",b.dataset.tab===state.tab));
   if(taskTab)renderTasks();if(state.tab==="sent")renderSent();if(state.tab==="gmail")renderGmailSuggestions();if(state.tab==="chat")renderChatSuggestions();if(state.tab==="meetings")renderMeetings();
 }
+async function loadMemoryDiagnostics(){
+  try{
+    const m=await api("/api/diagnostics/memory");
+    el("memoryState").textContent=`${Number(m.rss_mb||0).toFixed(0)} MB`;
+    const pct=Number(m.rss_percent||0);
+    el("memoryState").className=`pill ${pct>=85?"bad":pct>=70?"neutral":"ok"}`;
+    el("memoryDetail").textContent=`Current ${m.rss_mb||0} MB · Peak ${m.peak_rss_mb||0} MB · Limit ${m.memory_limit_mb||0} MB · Database ${m.database_mb||0} MB`;
+  }catch(err){
+    el("memoryState").textContent="Unavailable";
+    el("memoryState").className="pill neutral";
+    el("memoryDetail").textContent=err.message;
+  }
+}
+
 async function loadSystem(){
   state.system=await api("/api/system/status");const s=state.system;
 
@@ -259,6 +308,7 @@ async function runChatDiagnostics(){
 }
 
 function clearInactiveTabData(active){
+  state.activityCache={};
   if(active!=="client")state.client=[];
   if(active!=="payment")state.payment=[];
   if(active!=="invoice")state.invoice=[];
@@ -311,31 +361,48 @@ el("taskList").addEventListener("click",async e=>{
   if(key==="invoiceToggle"){await api(`/api/tasks/${id}`,{method:"PATCH",body:JSON.stringify({invoice_sent:!t.invoice_sent})});await load()}
   if(key==="checkResolution"){b.disabled=true;showPanel(id,`<div class="helper">Reviewing the attached email/chat chain for a possible resolution…</div>`);try{const r=await api(`/api/tasks/${id}/check-resolution`,{method:"POST"});if(r.assessment?.likely_resolved){await load()}else showPanel(id,`<div>No clear resolution yet.</div><div class="helper">${esc(r.assessment?.reason||"The communication does not appear to complete the task.")}</div>`)}catch(err){showPanel(id,`<div class="helper">${esc(err.message)}</div>`)}finally{b.disabled=false}}
   if(key==="gptHelp"){
-    if((t.gpt_help_prompt||"").trim()){
-      showPanel(id,`<div class="gpt-help"><textarea rows="9">${esc(t.gpt_help_prompt||"")}</textarea></div>`);
-    }else{
-      b.disabled=true;
-      showPanel(id,`<div class="helper">Preparing GPT help…</div>`);
-      try{
-        const r=await api(`/api/tasks/${id}/gpt-help`,{method:"POST"});
-        showPanel(id,r.can_help&&r.prompt
-          ?`<div class="gpt-help"><textarea rows="9">${esc(r.prompt||"")}</textarea></div>`
-          :`<div class="helper">No GPT prompt was prepared for this task.</div>`);
-        await load();
-      }catch(err){
-        showPanel(id,`<div class="helper">${esc(err.message)}</div>`);
-      }finally{
-        b.disabled=false;
-      }
+    b.disabled=true;
+    showPanel(id,`<div class="helper">Preparing GPT help…</div>`);
+    try{
+      const r=await api(`/api/tasks/${id}/gpt-help`,{method:"POST"});
+      showPanel(id,r.can_help&&r.prompt
+        ?`<div class="gpt-help"><textarea rows="9">${esc(r.prompt||"")}</textarea></div>`
+        :`<div class="helper">No GPT prompt was prepared for this task.</div>`);
+    }catch(err){
+      showPanel(id,`<div class="helper">${esc(err.message)}</div>`);
+    }finally{
+      b.disabled=false;
     }
   }
-  if(key==="reply"){state.currentReply=t;el("replyTo").value=t.email_to||"";el("replySubject").value=t.email_subject||`Re: ${t.title}`;el("replyBody").value=t.suggested_reply||`Hi,\n\nI wanted to follow up regarding ${t.title.toLowerCase()}.\n\n[INSERT CURRENT UPDATE]\n\nPlease let me know if you need anything further from us.\n\nThanks,\nTodd`;el("replyStatus").textContent="";el("openReplySource").classList.toggle("hidden",!(t.email_url||t.chat_space_uri));if(t.email_url||t.chat_space_uri)el("openReplySource").href=t.email_url||t.chat_space_uri;updateCompose();el("replyDialog").showModal()}
+  if(key==="reply"){
+    b.disabled=true;
+    try{
+      const full=await api(`/api/tasks/${id}`);
+      state.currentReply=full;
+      el("replyTo").value=full.email_to||"";
+      el("replySubject").value=full.email_subject||`Re: ${full.title}`;
+      el("replyBody").value=full.suggested_reply||`Hi,\n\nI wanted to follow up regarding ${full.title.toLowerCase()}.\n\n[INSERT CURRENT UPDATE]\n\nPlease let me know if you need anything further from us.\n\nThanks,\nTodd`;
+      el("replyStatus").textContent="";
+      el("openReplySource").classList.toggle("hidden",!(full.email_url||full.chat_space_uri));
+      if(full.email_url||full.chat_space_uri)el("openReplySource").href=full.email_url||full.chat_space_uri;
+      updateCompose();
+      el("replyDialog").showModal();
+    }finally{
+      b.disabled=false;
+    }
+  }
   if(key==="chatReply"){
-    state.currentChatReply=t;
-    el("chatReplyContext").textContent=`${t.party} · ${t.title}`;
-    el("chatReplyBody").value=t.suggested_reply||"";
-    el("chatReplyStatus").textContent="";
-    el("chatReplyDialog").showModal();
+    b.disabled=true;
+    try{
+      const full=await api(`/api/tasks/${id}`);
+      state.currentChatReply=full;
+      el("chatReplyContext").textContent=`${full.party} · ${full.title}`;
+      el("chatReplyBody").value=full.suggested_reply||"";
+      el("chatReplyStatus").textContent="";
+      el("chatReplyDialog").showModal();
+    }finally{
+      b.disabled=false;
+    }
   }
   if(key==="markPaid"){
     showPanel(id,`<div class="formgrid">
@@ -355,6 +422,22 @@ el("taskList").addEventListener("click",async e=>{
   if(key==="delete"&&confirm("Permanently delete this item?")){await api(`/api/tasks/${id}`,{method:"DELETE"});await load()}
   if(key==="resolutionYes"||key==="resolutionNo"){const reviewId=Number(b.dataset.reviewId),resolved=key==="resolutionYes";await api(`/api/tasks/${id}/resolution/${reviewId}`,{method:"POST",body:JSON.stringify({resolved})});await load()}
 });
+// Load collapsed activity only when opened.
+document.addEventListener("click",e=>{
+  const summary=e.target.closest("details[data-activity-task] > summary");
+  if(!summary)return;
+  const details=summary.parentElement;
+  const id=Number(details.dataset.activityTask);
+  if(!id||state.activityCache[id])return;
+  setTimeout(async()=>{
+    if(!details.open)return;
+    const body=details.querySelector(".collapsed-log-body");
+    if(body)body.innerHTML=`<div class="helper">Loading…</div>`;
+    try{await ensureTaskActivity(id)}
+    catch(err){if(body)body.innerHTML=`<div class="helper">${esc(err.message)}</div>`}
+  },0);
+});
+
 el("taskList").addEventListener("click",async e=>{
   const b=e.target.closest("[data-save-status],[data-save-note],[data-save-deadline],[data-save-payment],[data-confirm-paid],[data-run-research]");if(!b)return;
   if(b.dataset.saveStatus){const id=Number(b.dataset.saveStatus);await api(`/api/tasks/${id}`,{method:"PATCH",body:JSON.stringify({status:el(`statusInput-${id}`).value})});await load()}
@@ -411,7 +494,7 @@ el("meetingList").addEventListener("click",async e=>{const add=e.target.closest(
 
 // Full communications sync.
 el("settingsBtn").addEventListener("click",()=>el("settingsDialog").showModal());
-el("diagnosticsBtn").addEventListener("click",async()=>{await loadSystem();el("diagnosticsDialog").showModal()});
+el("diagnosticsBtn").addEventListener("click",async()=>{await loadSystem();await loadMemoryDiagnostics();el("diagnosticsDialog").showModal()});
 el("checkChat").addEventListener("click",runChatDiagnostics);
 async function pollManualSync(){
   try{

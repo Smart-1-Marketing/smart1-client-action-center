@@ -136,6 +136,10 @@ def connect_db():
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA synchronous = NORMAL")
+    con.execute("PRAGMA cache_size = -4000")
+    con.execute("PRAGMA temp_store = FILE")
+    con.execute("PRAGMA mmap_size = 0")
     return con
 
 
@@ -518,6 +522,20 @@ def init_db():
             "INSERT INTO settings(key,value) VALUES('auto_add_invoices','1') "
             "ON CONFLICT(key) DO UPDATE SET value='1'"
         )
+
+        con.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_tasks_open_category ON tasks(completed,category);
+        CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(completed,due_date);
+        CREATE INDEX IF NOT EXISTS idx_notes_task ON notes(task_id,id);
+        CREATE INDEX IF NOT EXISTS idx_research_task ON task_research_logs(task_id,id);
+        CREATE INDEX IF NOT EXISTS idx_email_updates_task ON task_email_updates(task_id,id);
+        CREATE INDEX IF NOT EXISTS idx_chat_updates_task ON task_chat_updates(task_id,id);
+        CREATE INDEX IF NOT EXISTS idx_participants_task ON task_participants(task_id,id);
+        CREATE INDEX IF NOT EXISTS idx_resolution_task ON task_resolution_reviews(task_id,state,id);
+        CREATE INDEX IF NOT EXISTS idx_gmail_suggestions_state ON gmail_suggestions(state,id);
+        CREATE INDEX IF NOT EXISTS idx_chat_suggestions_state ON chat_suggestions(state,id);
+        CREATE INDEX IF NOT EXISTS idx_sent_monitors_state ON sent_monitors(state,id);
+        """)
 
         # Explicit user training: xwf.google.com is never a task source.
         con.execute(
@@ -2942,6 +2960,13 @@ def create_or_update_gpt_help(task_id):
         task = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if not task:
         raise RuntimeError("Task not found.")
+    if (task["gpt_help_prompt"] or "").strip():
+        return {
+            "can_help": bool(task["gpt_can_help"]),
+            "prompt": task["gpt_help_prompt"],
+            "reason": task["gpt_help_reason"] or "",
+            "cached": True,
+        }
     prompt = f"""
 Decide whether GPT can materially help Todd complete this business task itself, rather than merely remind him.
 Examples: draft or rewrite content, analyze information, research a defined topic, write code, troubleshoot from supplied evidence,
@@ -3064,38 +3089,47 @@ if AUTO_GMAIL_SYNC_MINUTES > 0 and os.environ.get("DISABLE_BACKGROUND_GMAIL_SYNC
 
 # ---------------- Serialization ----------------
 
-def serialize_task(row, con):
+def task_activity_counts(con, task_id):
+    row = con.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM notes WHERE task_id=?) AS notes_count,
+          (SELECT COUNT(*) FROM task_research_logs WHERE task_id=?) AS research_count,
+          (SELECT COUNT(*) FROM task_email_updates WHERE task_id=?) AS email_updates_count,
+          (SELECT COUNT(*) FROM task_chat_updates WHERE task_id=?) AS chat_updates_count
+        """,
+        (task_id, task_id, task_id, task_id)
+    ).fetchone()
+    return dict(row)
+
+
+def serialize_task_activity(task_id, con):
     notes = con.execute(
-        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 3", (row["id"],)
+        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 25",
+        (task_id,)
     ).fetchall()
     research = con.execute(
-        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 2",
-        (row["id"],)
+        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 15",
+        (task_id,)
     ).fetchall()
     updates = con.execute(
-        "SELECT id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails,created_at "
-        "FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 3",
-        (row["id"],)
+        """
+        SELECT id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,
+               received_at,email_url,match_method,direction,to_emails,cc_emails,created_at
+        FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 25
+        """,
+        (task_id,)
     ).fetchall()
     chat_updates = con.execute(
-        "SELECT id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction,created_at "
-        "FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 3",
-        (row["id"],)
+        """
+        SELECT id,message_name,space_name,space_display_name,sender_display_name,message_text,
+               create_time,match_method,thread_name,space_uri,direction,created_at
+        FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 25
+        """,
+        (task_id,)
     ).fetchall()
-    participants = con.execute(
-        "SELECT email,display_name,source FROM task_participants WHERE task_id=? ORDER BY id",
-        (row["id"],)
-    ).fetchall()
-    resolution_rows = con.execute(
-        "SELECT id,source_type,source_id,summary,confidence,sources_json,state,source_url,created_at,decided_at "
-        "FROM task_resolution_reviews WHERE task_id=? ORDER BY id DESC LIMIT 4",
-        (row["id"],)
-    ).fetchall()
-    item = dict(row)
-    if not item.get("source_received_at"):
-        item["source_received_at"] = item.get("created_at", "")
-    item["notes"] = [dict(n) for n in notes]
-    item["research_logs"] = []
+
+    research_logs = []
     for r in research:
         d = dict(r)
         try:
@@ -3103,10 +3137,51 @@ def serialize_task(row, con):
         except Exception:
             d["sources"] = []
             d.pop("sources_json", None)
-        item["research_logs"].append(d)
-    item["email_updates"] = [dict(u) for u in updates]
-    item["chat_updates"] = [dict(u) for u in chat_updates]
+        research_logs.append(d)
+
+    task = con.execute(
+        """
+        SELECT id,detail,suggested_reply,gpt_help_prompt,gpt_can_help,email_to,email_subject
+        FROM tasks WHERE id=?
+        """,
+        (task_id,)
+    ).fetchone()
+
+    return {
+        "task_id": task_id,
+        "notes": [dict(n) for n in notes],
+        "research_logs": research_logs,
+        "email_updates": [dict(u) for u in updates],
+        "chat_updates": [dict(u) for u in chat_updates],
+        "detail": task["detail"] if task else "",
+        "suggested_reply": task["suggested_reply"] if task else "",
+        "gpt_help_prompt": task["gpt_help_prompt"] if task else "",
+        "gpt_can_help": bool(task["gpt_can_help"]) if task else False,
+        "email_to": task["email_to"] if task else "",
+        "email_subject": task["email_subject"] if task else "",
+    }
+
+
+def serialize_task(row, con, compact=False):
+    item = dict(row)
+    if not item.get("source_received_at"):
+        item["source_received_at"] = item.get("created_at", "")
+
+    participants = con.execute(
+        "SELECT email,display_name,source FROM task_participants WHERE task_id=? ORDER BY id",
+        (row["id"],)
+    ).fetchall()
     item["participants"] = [dict(u) for u in participants]
+
+    resolution_rows = con.execute(
+        """
+        SELECT id,source_type,source_id,summary,confidence,sources_json,state,source_url,created_at,decided_at
+        FROM task_resolution_reviews
+        WHERE task_id=? AND state='pending'
+        ORDER BY id DESC LIMIT 2
+        """,
+        (row["id"],)
+    ).fetchall()
     item["resolution_reviews"] = []
     for r in resolution_rows:
         d = dict(r)
@@ -3116,6 +3191,27 @@ def serialize_task(row, con):
             d["sources"] = []
             d.pop("sources_json", None)
         item["resolution_reviews"].append(d)
+
+    if compact:
+        item.update(task_activity_counts(con, row["id"]))
+        item["notes"] = []
+        item["research_logs"] = []
+        item["email_updates"] = []
+        item["chat_updates"] = []
+        item["gpt_prompt_prepared"] = bool(item.get("gpt_help_prompt"))
+        item["gpt_help_prompt"] = ""
+        item["suggested_reply"] = ""
+        detail = item.get("detail") or ""
+        item["detail_truncated"] = len(detail) > 1800
+        if len(detail) > 1800:
+            item["detail"] = detail[:1800].rstrip() + "…"
+        return item
+
+    activity = serialize_task_activity(row["id"], con)
+    item["notes"] = activity["notes"]
+    item["research_logs"] = activity["research_logs"]
+    item["email_updates"] = activity["email_updates"]
+    item["chat_updates"] = activity["chat_updates"]
     return item
 
 
@@ -3124,6 +3220,41 @@ def serialize_task(row, con):
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
+
+
+def linux_memory_status():
+    result = {
+        "rss_mb": 0.0, "peak_rss_mb": 0.0, "database_mb": 0.0,
+        "memory_limit_mb": 0, "rss_percent": 0.0,
+    }
+    try:
+        values = {}
+        with open("/proc/self/status", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith(("VmRSS:", "VmHWM:")):
+                    key, value = line.split(":", 1)
+                    values[key] = float(value.strip().split()[0]) / 1024.0
+        result["rss_mb"] = round(values.get("VmRSS", 0.0), 1)
+        result["peak_rss_mb"] = round(values.get("VmHWM", 0.0), 1)
+    except Exception:
+        pass
+    try:
+        result["database_mb"] = round(DB_PATH.stat().st_size / (1024 * 1024), 2)
+    except Exception:
+        pass
+    try:
+        result["memory_limit_mb"] = int(os.environ.get("APP_MEMORY_LIMIT_MB", "512"))
+    except Exception:
+        result["memory_limit_mb"] = 512
+    if result["memory_limit_mb"]:
+        result["rss_percent"] = round(result["rss_mb"] / result["memory_limit_mb"] * 100, 1)
+    return result
+
+
+@app.get("/api/diagnostics/memory")
+@login_required
+def memory_diagnostics():
+    return jsonify(linux_memory_status())
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -4008,7 +4139,7 @@ def list_tasks():
             WHERE {' AND '.join(where)}
             ORDER BY CASE WHEN due_date='' THEN 1 ELSE 0 END, due_date ASC, party ASC
         """, params).fetchall()
-        return jsonify([serialize_task(r, con) for r in rows])
+        return jsonify([serialize_task(r, con, compact=True) for r in rows])
 
 
 
@@ -4030,7 +4161,7 @@ def invoice_register():
               id DESC
             """
         ).fetchall()
-        return jsonify([serialize_task(r, con) for r in rows])
+        return jsonify([serialize_task(r, con, compact=True) for r in rows])
 
 
 
@@ -4119,6 +4250,26 @@ def create_task():
         ))
         row = con.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
         return jsonify(serialize_task(row, con)), 201
+
+
+
+@app.get("/api/tasks/<int:task_id>")
+@login_required
+def get_task_detail(task_id):
+    with connect_db() as con:
+        row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            return jsonify({"error": "Task not found"}), 404
+        return jsonify(serialize_task(row, con, compact=False))
+
+
+@app.get("/api/tasks/<int:task_id>/activity")
+@login_required
+def get_task_activity(task_id):
+    with connect_db() as con:
+        if not con.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+            return jsonify({"error": "Task not found"}), 404
+        return jsonify(serialize_task_activity(task_id, con))
 
 
 @app.patch("/api/tasks/<int:task_id>")
