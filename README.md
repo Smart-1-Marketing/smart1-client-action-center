@@ -638,3 +638,6 @@ See `POSTGRES_MIGRATION.md`.
 
 The included `render.yaml` is the migration-phase Blueprint.
 After migration, use the contents of `render-postgres-final.yaml`.
+
+
+See `POSTGRES_HOTFIX.md` for the PostgreSQL startup/transaction hotfix.

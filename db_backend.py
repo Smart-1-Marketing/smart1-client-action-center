@@ -68,7 +68,14 @@ class CompatRow:
 
 
 def compat_row_factory(cursor):
-    columns = [col.name for col in cursor.description]
+    """sqlite3.Row-like row factory that also supports result-less SQL."""
+    description = cursor.description
+    if not description:
+        # Psycopg still asks for a row maker after DDL/UPDATE/INSERT statements,
+        # even though those statements don't return rows.
+        return lambda values: CompatRow((), values)
+
+    columns = [getattr(col, "name", str(col)) for col in description]
 
     def make_row(values):
         return CompatRow(columns, values)
@@ -115,6 +122,14 @@ def translate_sql(sql):
         flags=re.I,
     )
 
+    # SQLite's MAX(column, value) scalar form maps to PostgreSQL GREATEST().
+    statement = re.sub(
+        r"\bMAX\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*(\?)\s*\)",
+        r"GREATEST(\1, \2)",
+        statement,
+        flags=re.I,
+    )
+
     ignored_insert = bool(re.match(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\b", statement, re.I))
     if ignored_insert:
         statement = re.sub(
@@ -153,7 +168,7 @@ class PgCursor:
 
     @property
     def lastrowid(self):
-        if not self.insert_table or self.rowcount == 0:
+        if not self.insert_table or self.rowcount <= 0:
             return None
         if self.insert_table not in SERIAL_TABLES:
             return None

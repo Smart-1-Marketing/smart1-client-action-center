@@ -1537,13 +1537,10 @@ def add_task_participants(con, task_id, participants, source="email"):
         email = (item.get("email") or "").strip().lower()
         if not email:
             continue
-        try:
-            con.execute(
-                "INSERT OR IGNORE INTO task_participants(task_id,email,display_name,source) VALUES(?,?,?,?)",
-                (task_id, email, (item.get("name") or "").strip(), source),
-            )
-        except sqlite3.IntegrityError:
-            pass
+        con.execute(
+            "INSERT OR IGNORE INTO task_participants(task_id,email,display_name,source) VALUES(?,?,?,?)",
+            (task_id, email, (item.get("name") or "").strip(), source),
+        )
 
 
 def task_participant_emails(con, task_id):
@@ -1555,19 +1552,18 @@ def task_participant_emails(con, task_id):
 
 
 def attach_email_update(con, task_id, email, match_method="thread", make_urgent=True):
-    try:
-        con.execute("""
-            INSERT INTO task_email_updates
-            (task_id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            task_id, email["message_id"], email["thread_id"], email["sender_name"], email["sender_email"],
-            email["subject"], email["snippet"][:1200], email["received"].isoformat(), email["url"], match_method,
-            "sent" if email.get("is_sent") else "incoming",
-            ", ".join(x.get("email", "") for x in email.get("to_addresses", [])),
-            ", ".join(x.get("email", "") for x in email.get("cc_addresses", [])),
-        ))
-    except sqlite3.IntegrityError:
+    cur = con.execute("""
+        INSERT OR IGNORE INTO task_email_updates
+        (task_id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        task_id, email["message_id"], email["thread_id"], email["sender_name"], email["sender_email"],
+        email["subject"], email["snippet"][:1200], email["received"].isoformat(), email["url"], match_method,
+        "sent" if email.get("is_sent") else "incoming",
+        ", ".join(x.get("email", "") for x in email.get("to_addresses", [])),
+        ", ".join(x.get("email", "") for x in email.get("cc_addresses", [])),
+    ))
+    if cur.rowcount == 0:
         return False
     add_task_participants(con, task_id, email.get("participants", []), "sent email" if email.get("is_sent") else "incoming email")
     if make_urgent and not email.get("is_sent"):
@@ -1738,7 +1734,7 @@ def sync_gmail():
                 if analysis.get("actionable") and classification != "ignore":
                     try:
                         cur = con.execute("""
-                            INSERT INTO gmail_suggestions
+                            INSERT OR IGNORE INTO gmail_suggestions
                             (gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,
                              suggested_title,suggested_category,suggested_priority,suggested_due_date,suggested_summary,
                              suggested_reply,payment_amount,currency,invoice_number,invoice_sent,confidence,reason,
@@ -1756,6 +1752,8 @@ def sync_gmail():
                             analysis.get("gpt_help_reason", ""), int(email.get("recipient_count", 0) or 0),
                             json.dumps(email.get("participants", []))
                         ))
+                        if cur.rowcount == 0:
+                            continue
                         suggestion_id = cur.lastrowid
                         added += 1
                         should_auto_add = get_setting("gmail_auto_add", "0") == "1"
@@ -1774,8 +1772,8 @@ def sync_gmail():
                                     (task_id, "Invoice automatically added to Finances / Bills to Pay from Gmail.")
                                 )
                             auto_added += 1
-                    except sqlite3.IntegrityError:
-                        pass
+                    except Exception as exc:
+                        set_setting("gmail_last_error", f"Message processing error: {exc}")
 
         if related_task_id:
             if related_attached:
@@ -2121,14 +2119,11 @@ def store_meeting_review(email, analysis, analyzer):
     if not tasks:
         return False
     with connect_db() as con:
-        try:
-            con.execute("""
-                INSERT INTO meeting_reviews(source_message_id,gmail_thread_id,meeting_title,summary,tasks_json,email_url,received_at,analyzer,state)
-                VALUES (?,?,?,?,?,?,?,?,'new')
-            """, (email["message_id"], email["thread_id"], analysis.get("meeting_title", "") or email.get("subject", "Meeting summary"), analysis.get("meeting_summary", ""), json.dumps(tasks), email.get("url", ""), email["received"].isoformat(), analyzer))
-            return True
-        except sqlite3.IntegrityError:
-            return False
+        cur = con.execute("""
+            INSERT OR IGNORE INTO meeting_reviews(source_message_id,gmail_thread_id,meeting_title,summary,tasks_json,email_url,received_at,analyzer,state)
+            VALUES (?,?,?,?,?,?,?,?,'new')
+        """, (email["message_id"], email["thread_id"], analysis.get("meeting_title", "") or email.get("subject", "Meeting summary"), analysis.get("meeting_summary", ""), json.dumps(tasks), email.get("url", ""), email["received"].isoformat(), analyzer))
+        return cur.rowcount > 0
 
 
 def looks_like_meeting_recap(email):
@@ -2819,18 +2814,17 @@ CANDIDATE TASKS
 def attach_chat_update(con, task_id, msg, space, match_method="chat thread", make_urgent=True):
     name = msg.get("name", "")
     sender = msg.get("sender", {}) or {}
-    try:
-        con.execute(
-            """
-            INSERT INTO task_chat_updates
-            (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction)
-            VALUES (?,?,?,?,?,?,?,?,?,?,'incoming')
-            """,
-            (task_id, name, space.get("name", ""), space.get("displayName", "") or space.get("spaceType", ""),
-             sender.get("displayName", "") or sender.get("name", ""), chat_message_text(msg)[:5000],
-             msg.get("createTime", ""), match_method, chat_thread_name(msg), space.get("spaceUri", ""))
-        )
-    except sqlite3.IntegrityError:
+    cur = con.execute(
+        """
+        INSERT OR IGNORE INTO task_chat_updates
+        (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'incoming')
+        """,
+        (task_id, name, space.get("name", ""), space.get("displayName", "") or space.get("spaceType", ""),
+         sender.get("displayName", "") or sender.get("name", ""), chat_message_text(msg)[:5000],
+         msg.get("createTime", ""), match_method, chat_thread_name(msg), space.get("spaceUri", ""))
+    )
+    if cur.rowcount == 0:
         return False
     if make_urgent:
         con.execute(
@@ -2936,7 +2930,7 @@ def sync_google_chat():
                 try:
                     con.execute(
                         """
-                        INSERT INTO chat_suggestions
+                        INSERT OR IGNORE INTO chat_suggestions
                         (message_name,space_name,space_display_name,sender_user_name,sender_display_name,message_text,
                          create_time,suggested_title,suggested_category,suggested_priority,suggested_due_date,
                          suggested_summary,suggested_reply,confidence,reason,gpt_can_help,gpt_help_prompt,gpt_help_reason,
@@ -2953,9 +2947,12 @@ def sync_google_chat():
                          float(analysis.get("payment_amount", 0) or 0), analysis.get("currency", "USD") or "USD",
                          analysis.get("invoice_number", ""))
                     )
-                    added += 1
-                except sqlite3.IntegrityError:
-                    pass
+                    if cur.rowcount > 0:
+                        added += 1
+                except Exception as exc:
+                    space_errors.append(
+                        f"{space.get('displayName') or space.get('name')}: message processing error: {exc}"
+                    )
     set_setting("chat_last_sync", datetime.now().astimezone().isoformat())
     set_setting("chat_last_error", space_errors[0] if space_errors else "")
     return {
@@ -4454,20 +4451,17 @@ def send_chat_reply(task_id):
 
     with connect_db() as con:
         stored_name = message_name or f"local-sent-{task_id}-{int(time.time())}"
-        try:
-            con.execute(
-                """
-                INSERT INTO task_chat_updates
-                (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,
-                 create_time,match_method,thread_name,space_uri,direction)
-                VALUES (?,?,?,?,?,?,?,?,?,?,'outgoing')
-                """,
-                (task_id, stored_name, space_name, task["party"] or "Google Chat",
-                 "Todd / Smart 1", text, create_time, "sent from Action Center",
-                 sent_thread, space_uri)
-            )
-        except sqlite3.IntegrityError:
-            pass
+        con.execute(
+            """
+            INSERT OR IGNORE INTO task_chat_updates
+            (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,
+             create_time,match_method,thread_name,space_uri,direction)
+            VALUES (?,?,?,?,?,?,?,?,?,?,'outgoing')
+            """,
+            (task_id, stored_name, space_name, task["party"] or "Google Chat",
+             "Todd / Smart 1", text, create_time, "sent from Action Center",
+             sent_thread, space_uri)
+        )
         if message_name:
             chat_record_processed(con, message_name, space_name, "outgoing_task_reply")
         con.execute(

@@ -265,3 +265,17 @@ source for the automatic SQLite -> PostgreSQL migration.
 
 Do not switch to the final no-disk Blueprint until the dashboard confirms your existing data
 is present in PostgreSQL.
+
+
+## PostgreSQL startup hotfix
+
+At minimum replace:
+
+```text
+db_backend.py
+app.py
+POSTGRES_HOTFIX.md
+```
+
+The complete hotfix ZIP includes the full application. Keep using migration-phase `render.yaml`
+until the old SQLite data has successfully copied to PostgreSQL.

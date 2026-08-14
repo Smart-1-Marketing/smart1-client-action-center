@@ -1,0 +1,11 @@
+{
+  "reported_cursor_description_none_crash": "FIXED",
+  "resultless_row_factory_test": "PASS",
+  "normal_row_factory_test": "PASS",
+  "sqlite_max_to_postgres_greatest": "PASS",
+  "duplicate_transaction_safety": "PASS",
+  "python_syntax": "PASS",
+  "javascript_syntax": "PASS",
+  "sqlite_fallback": "PRESERVED",
+  "postgres_worker_architecture": "PRESERVED"
+}
