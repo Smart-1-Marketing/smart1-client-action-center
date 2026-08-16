@@ -169,113 +169,23 @@ After deploy:
 4. Settings contains Watch Domains and Dark/Light mode.
 5. `Sales Team to Me` should disappear from active Chat review/tasks.
 6. Gmail/Chat live tasks should show **Not a Task — Train Type**.
-## Lean Memory + Cleanup release
-
-Replace:
-```text
-app.py
-static/app.js
-static/style.css
-templates/index.html
-render.yaml
-requirements.txt
-README.md
-UPGRADE_CHECKLIST.md
-```
-
-Keep:
-```text
-.python-version
-/var/data/tasks.db
-```
-
-After deploy:
-1. Render should build without installing the `openai` Python package.
-2. Sent-mail analysis should no longer include Todd's signature.
-3. `Sales Team to Me` should stay excluded.
-4. `QuickBooks Payments` should disappear from active task/review/follow-up areas.
-5. GPT task areas should show buttons only.
-6. Notes and Email Chain Updates should be collapsed until clicked.
-7. Gmail/Chat-created tasks should show **Don't Make This a Task**.
-8. **Dismiss Follow-up** should remove the card immediately.
-9. Watch Render memory through at least two full sync cycles.
-## Button audit + Group Chat update
-
-Replace:
-```text
-app.py
-static/app.js
-static/style.css
-templates/index.html
-README.md
-UPGRADE_CHECKLIST.md
-BUTTON_AUDIT.md
-BUTTON_AUDIT.json
-```
-
-Keep:
-```text
-render.yaml
-requirements.txt
-.python-version
-/var/data/tasks.db
-```
-## Mobile + Memory Efficiency update
-
-Replace:
-```text
-app.py
-static/app.js
-static/style.css
-templates/index.html
-render.yaml
-README.md
-UPGRADE_CHECKLIST.md
-MOBILE_MEMORY_AUDIT.json
-```
-
-Keep:
-```text
-requirements.txt
-.python-version
-/var/data/tasks.db
-```
-
-
-## PostgreSQL + Worker release
+## Emergency SQLite recovery release
 
 Replace/add:
-
 ```text
 app.py
-db_backend.py
-worker.py
-requirements.txt
-render.yaml
-render-postgres-final.yaml
-POSTGRES_MIGRATION.md
+templates/recovery.html
+repair_db.py
 README.md
 UPGRADE_CHECKLIST.md
 ```
 
-Also keep the mobile/UI files from this package.
+Do **not** delete or replace `/var/data/tasks.db`.
 
-For the FIRST deployment keep the existing `/var/data` disk attached because it is the
-source for the automatic SQLite -> PostgreSQL migration.
-
-Do not switch to the final no-disk Blueprint until the dashboard confirms your existing data
-is present in PostgreSQL.
-
-
-## PostgreSQL startup hotfix
-
-At minimum replace:
-
-```text
-db_backend.py
-app.py
-POSTGRES_HOTFIX.md
-```
-
-The complete hotfix ZIP includes the full application. Keep using migration-phase `render.yaml`
-until the old SQLite data has successfully copied to PostgreSQL.
+After deploy:
+1. The service should boot instead of crashing.
+2. Sign in.
+3. You should be redirected to **Database Recovery Required**.
+4. Click **Create Safety Copy** first.
+5. If the page says native sqlite3 recovery is available, click **Attempt Database Recovery**.
+6. If sqlite3 recovery is unavailable, use the Render disk snapshot from before the corruption or recover the copied DB externally.

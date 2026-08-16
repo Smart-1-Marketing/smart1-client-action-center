@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Database Recovery · Smart 1 Client Action Center</title>
+  <style>
+    :root{color-scheme:light dark}
+    body{font-family:Arial,sans-serif;margin:0;background:#f4f7fb;color:#172033}
+    .wrap{max-width:980px;margin:30px auto;padding:0 18px}
+    .card{background:white;border:1px solid #dce3ec;border-radius:16px;padding:22px;margin-bottom:16px;box-shadow:0 5px 20px rgba(0,0,0,.04)}
+    h1{margin-top:0} .bad{color:#b42318}.ok{color:#067647}
+    code,pre{background:#f1f4f8;border-radius:8px;padding:3px 6px}
+    pre{padding:14px;white-space:pre-wrap;overflow:auto}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .metric{background:#f8fafc;border:1px solid #e3e8ef;border-radius:12px;padding:12px}
+    .metric span{display:block;color:#667085;font-size:12px}.metric strong{font-size:18px}
+    button,a.btn{border:0;border-radius:9px;padding:10px 14px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}
+    .primary{background:#2563eb;color:white}.secondary{background:#eef2f7;color:#172033}.danger{background:#fee4e2;color:#b42318}
+    #result{margin-top:12px}
+    table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px;border-bottom:1px solid #e6eaf0;text-align:left}
+    @media(max-width:700px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Database Recovery Required</h1>
+    <p class="bad"><strong>The Action Center detected a corrupted SQLite database and intentionally did not overwrite it.</strong></p>
+    <p>{{ status.error }}</p>
+    <div class="grid">
+      <div class="metric"><span>Database</span><strong>{{ status.db_path }}</strong></div>
+      <div class="metric"><span>Database size</span><strong>{{ status.db_size }} bytes</strong></div>
+      <div class="metric"><span>SQLite quick_check</span><strong>{{ status.quick_check|join(" · ") }}</strong></div>
+      <div class="metric"><span>Native sqlite3 recovery tool</span><strong>{{ "Available" if status.sqlite3_cli else "Not available" }}</strong></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>1. Preserve the damaged database</h2>
+    <p>This copies <code>tasks.db</code>, <code>tasks.db-wal</code>, and <code>tasks.db-shm</code> into a timestamped backup folder on the persistent disk.</p>
+    <button id="backup" class="secondary">Create Safety Copy</button>
+  </div>
+
+  <div class="card">
+    <h2>2. Attempt SQLite recovery</h2>
+    {% if status.sqlite3_cli %}
+      <p>The Render runtime has the native SQLite CLI, so the app can run SQLite's <code>.recover</code> workflow. It first creates another safety copy and only installs the recovered database if it passes <code>PRAGMA quick_check</code>.</p>
+      <button id="recover" class="primary">Attempt Database Recovery</button>
+    {% else %}
+      <p>The native <code>sqlite3</code> CLI is not present on this runtime. The damaged database remains untouched. Use a Render disk snapshot from before the corruption, or download the database and run SQLite <code>.recover</code> externally.</p>
+    {% endif %}
+    <pre id="result">No recovery action has been run yet.</pre>
+  </div>
+
+  <div class="card">
+    <h2>Available recovery backups</h2>
+    <table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>
+    {% for b in status.backups %}
+      <tr><td>{{ b.name }}</td><td>{{ b.size }}</td><td>{{ b.modified }}</td></tr>
+    {% else %}
+      <tr><td colspan="3">No recovery copies have been created yet.</td></tr>
+    {% endfor %}
+    </tbody></table>
+  </div>
+</div>
+<script>
+async function post(url){
+  const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  const text=await r.text();let data;try{data=JSON.parse(text)}catch(_){data={raw:text}}
+  document.getElementById("result").textContent=JSON.stringify(data,null,2);
+  if(data.ok && url.endsWith("/attempt"))setTimeout(()=>location.href="/",1500);
+}
+document.getElementById("backup")?.addEventListener("click",()=>post("/api/database/recovery/backup"));
+document.getElementById("recover")?.addEventListener("click",()=>{
+  if(confirm("This will preserve the corrupt database first, then attempt SQLite recovery. Continue?"))post("/api/database/recovery/attempt");
+});
+</script>
+</body>
+</html>

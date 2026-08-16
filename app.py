@@ -2,6 +2,8 @@ import base64
 import json
 import os
 import re
+import shutil
+import subprocess
 import sqlite3
 import threading
 import time
@@ -13,7 +15,6 @@ from email.mime.text import MIMEText
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
-from urllib import error as urllib_error, request as urllib_request
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -21,9 +22,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from openai import OpenAI
 from werkzeug.middleware.proxy_fix import ProxyFix
-
-from db_backend import connect_db as backend_connect_db, using_postgres, migrate_sqlite_to_postgres_if_needed
 
 app = Flask(__name__)
 # Honor Render's X-Forwarded-Proto/X-Forwarded-Host so externally generated
@@ -37,6 +37,10 @@ if os.environ.get("RENDER", "").lower() == "true":
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "tasks.db"
+DB_BACKUP_DIR = DATA_DIR / "db-backups"
+DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+DB_STARTUP_ERROR = ""
+DB_LAST_QUICK_CHECK = []
 
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
@@ -134,7 +138,14 @@ SEED_TASKS = [
 
 
 def connect_db():
-    return backend_connect_db(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout = 30000")
+    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA synchronous = FULL")
+    con.execute("PRAGMA wal_autocheckpoint = 500")
+    return con
 
 
 def column_names(con, table):
@@ -485,22 +496,6 @@ def init_db():
         ]:
             ensure_column(con, "task_resolution_reviews", definition)
 
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS sync_jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                state TEXT NOT NULL DEFAULT 'queued',
-                requested_by TEXT DEFAULT 'manual',
-                requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                started_at TEXT DEFAULT '',
-                finished_at TEXT DEFAULT '',
-                result_json TEXT DEFAULT '{}',
-                error TEXT DEFAULT ''
-            )
-        """)
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sync_jobs_state ON sync_jobs(state,id)"
-        )
-
         if con.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0:
             con.executemany("""
                 INSERT INTO tasks
@@ -533,20 +528,6 @@ def init_db():
             "ON CONFLICT(key) DO UPDATE SET value='1'"
         )
 
-        con.executescript("""
-        CREATE INDEX IF NOT EXISTS idx_tasks_open_category ON tasks(completed,category);
-        CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(completed,due_date);
-        CREATE INDEX IF NOT EXISTS idx_notes_task ON notes(task_id,id);
-        CREATE INDEX IF NOT EXISTS idx_research_task ON task_research_logs(task_id,id);
-        CREATE INDEX IF NOT EXISTS idx_email_updates_task ON task_email_updates(task_id,id);
-        CREATE INDEX IF NOT EXISTS idx_chat_updates_task ON task_chat_updates(task_id,id);
-        CREATE INDEX IF NOT EXISTS idx_participants_task ON task_participants(task_id,id);
-        CREATE INDEX IF NOT EXISTS idx_resolution_task ON task_resolution_reviews(task_id,state,id);
-        CREATE INDEX IF NOT EXISTS idx_gmail_suggestions_state ON gmail_suggestions(state,id);
-        CREATE INDEX IF NOT EXISTS idx_chat_suggestions_state ON chat_suggestions(state,id);
-        CREATE INDEX IF NOT EXISTS idx_sent_monitors_state ON sent_monitors(state,id);
-        """)
-
         # Explicit user training: xwf.google.com is never a task source.
         con.execute(
             """
@@ -559,25 +540,6 @@ def init_db():
             """
             INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
             VALUES('chat','space','sales team to me','Explicitly removed by user',1)
-            """
-        )
-        con.execute(
-            """
-            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
-            VALUES('chat','space','client success','Explicitly removed by user',1)
-            """
-        )
-
-        con.execute(
-            """
-            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
-            VALUES('gmail','sender_name','quickbooks payments','Explicitly removed by user',1)
-            """
-        )
-        con.execute(
-            """
-            INSERT OR IGNORE INTO ignore_sources(source_type,rule_type,value,note,enabled)
-            VALUES('chat','space','quickbooks payments','Explicitly removed by user',1)
             """
         )
 
@@ -595,63 +557,22 @@ def init_db():
             INSERT INTO notes(task_id,body)
             SELECT id,'Removed from open tasks because the Google Chat space "Sales Team to Me" is ignored.'
             FROM tasks
-            WHERE completed=0 AND source_kind='chat' AND lower(trim(party)) IN ('sales team to me','client success')
+            WHERE completed=0 AND source_kind='chat' AND lower(trim(party))='sales team to me'
             """
         )
         con.execute(
             """
             UPDATE tasks
             SET completed=1,completed_at=CURRENT_TIMESTAMP,status='Completed',updated_at=CURRENT_TIMESTAMP
-            WHERE completed=0 AND source_kind='chat' AND lower(trim(party)) IN ('sales team to me','client success')
+            WHERE completed=0 AND source_kind='chat' AND lower(trim(party))='sales team to me'
             """
         )
         con.execute(
             """
             UPDATE gmail_suggestions
             SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
-            WHERE lower(sender_email) LIKE ?
+            WHERE lower(sender_email) LIKE '%@xwf.google.com'
               AND state='new'
-            """,
-            ("%@xwf.google.com",)
-        )
-
-        con.execute(
-            """
-            UPDATE gmail_suggestions
-            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
-            WHERE lower(trim(sender_name))='quickbooks payments'
-              AND state='new'
-            """
-        )
-        con.execute(
-            """
-            UPDATE chat_suggestions
-            SET state='trained_not_task',updated_at=CURRENT_TIMESTAMP
-            WHERE lower(trim(space_display_name)) IN ('sales team to me','client success','quickbooks payments')
-              AND state='new'
-            """
-        )
-        con.execute(
-            """
-            UPDATE sent_monitors
-            SET state='dismissed'
-            WHERE state='monitoring'
-              AND lower(trim(party))='quickbooks payments'
-            """
-        )
-        con.execute(
-            """
-            INSERT INTO notes(task_id,body)
-            SELECT id,'Removed from open tasks because "QuickBooks Payments" is ignored.'
-            FROM tasks
-            WHERE completed=0 AND lower(trim(party))='quickbooks payments'
-            """
-        )
-        con.execute(
-            """
-            UPDATE tasks
-            SET completed=1,completed_at=CURRENT_TIMESTAMP,status='Completed',updated_at=CURRENT_TIMESTAMP
-            WHERE completed=0 AND lower(trim(party))='quickbooks payments'
             """
         )
 
@@ -692,23 +613,210 @@ def init_db():
         )
 
 
-init_db()
+def database_quick_check(path=None):
+    """Read-only integrity probe. Returns a list of SQLite quick_check messages."""
+    target = Path(path or DB_PATH)
+    if not target.exists():
+        return ["missing"]
+    uri = f"file:{target}?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=10)
+        try:
+            rows = con.execute("PRAGMA quick_check").fetchall()
+            return [str(r[0]) for r in rows]
+        finally:
+            con.close()
+    except Exception as exc:
+        return [f"{type(exc).__name__}: {exc}"]
 
-# First PostgreSQL deployment only: the web service can see the old Render disk,
-# so it performs the one-time SQLite -> Postgres copy before accepting traffic.
-if using_postgres() and os.environ.get("MIGRATE_SQLITE_TO_POSTGRES", "0") == "1":
-    migration_result = migrate_sqlite_to_postgres_if_needed(DB_PATH)
-    if migration_result.get("completed"):
-        print(f"SQLite -> PostgreSQL migration completed: {migration_result.get('tables', {})}")
+
+def database_is_healthy(path=None):
+    result = database_quick_check(path)
+    return result == ["ok"]
+
+
+def copy_database_artifacts(reason="manual"):
+    """Copy DB/WAL/SHM before any recovery attempt."""
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    folder = DB_BACKUP_DIR / f"{stamp}-{reason}"
+    folder.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(DB_PATH) + suffix)
+        if source.exists():
+            dest = folder / source.name
+            shutil.copy2(source, dest)
+            copied.append(str(dest))
+    return folder, copied
+
+
+def consistent_database_backup(force=False):
+    """Create a logical SQLite backup from a healthy live DB and retain recent copies."""
+    if not DB_PATH.exists() or not database_is_healthy():
+        return None
+
+    now = datetime.now().astimezone()
+    existing = sorted(DB_BACKUP_DIR.glob("healthy-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if existing and not force:
+        age_seconds = now.timestamp() - existing[0].stat().st_mtime
+        if age_seconds < 6 * 60 * 60:
+            return existing[0]
+
+    dest = DB_BACKUP_DIR / f"healthy-{now.strftime('%Y%m%d-%H%M%S')}.db"
+    source_con = sqlite3.connect(DB_PATH, timeout=30)
+    backup_con = sqlite3.connect(dest)
+    try:
+        source_con.backup(backup_con)
+    finally:
+        backup_con.close()
+        source_con.close()
+
+    # Keep the newest 14 logical backups.
+    backups = sorted(DB_BACKUP_DIR.glob("healthy-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in backups[14:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return dest
+
+
+def safe_init_db():
+    global DB_STARTUP_ERROR, DB_LAST_QUICK_CHECK
+    try:
+        if DB_PATH.exists():
+            DB_LAST_QUICK_CHECK = database_quick_check()
+            if DB_LAST_QUICK_CHECK != ["ok"]:
+                DB_STARTUP_ERROR = "SQLite integrity check failed: " + " | ".join(DB_LAST_QUICK_CHECK[:10])
+                app.logger.error(DB_STARTUP_ERROR)
+                return False
+
+        init_db()
+        DB_LAST_QUICK_CHECK = database_quick_check()
+        if DB_LAST_QUICK_CHECK != ["ok"]:
+            DB_STARTUP_ERROR = "SQLite integrity check failed after initialization: " + " | ".join(DB_LAST_QUICK_CHECK[:10])
+            app.logger.error(DB_STARTUP_ERROR)
+            return False
+
+        DB_STARTUP_ERROR = ""
+        try:
+            consistent_database_backup()
+        except Exception:
+            app.logger.exception("Could not create startup SQLite backup")
+        return True
+    except sqlite3.DatabaseError as exc:
+        DB_STARTUP_ERROR = f"{type(exc).__name__}: {exc}"
+        app.logger.exception("SQLite startup failed; entering recovery mode")
+        return False
+    except Exception as exc:
+        DB_STARTUP_ERROR = f"{type(exc).__name__}: {exc}"
+        app.logger.exception("Database startup failed; entering recovery mode")
+        return False
+
+
+def native_sqlite3_path():
+    return shutil.which("sqlite3")
+
+
+def attempt_native_sqlite_recovery():
+    """Use SQLite's official .recover command when the native CLI is available."""
+    global DB_STARTUP_ERROR, DB_LAST_QUICK_CHECK
+
+    cli = native_sqlite3_path()
+    if not cli:
+        return {
+            "ok": False,
+            "error": "The native sqlite3 CLI is not installed on this Render runtime. Use a Render disk snapshot or run recovery from a machine with the sqlite3 CLI.",
+        }
+
+    backup_folder, copied = copy_database_artifacts("pre-recovery")
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    sql_path = backup_folder / f"recover-{stamp}.sql"
+    recovered_path = DATA_DIR / f"tasks.recovered-{stamp}.db"
+
+    try:
+        with sql_path.open("wb") as out:
+            proc = subprocess.run(
+                [cli, str(DB_PATH), ".recover --ignore-freelist"],
+                stdout=out,
+                stderr=subprocess.PIPE,
+                timeout=180,
+            )
+        if proc.returncode != 0:
+            return {
+                "ok": False,
+                "error": proc.stderr.decode("utf-8", "replace")[-4000:],
+                "backup_folder": str(backup_folder),
+                "copied": copied,
+            }
+
+        with sql_path.open("rb") as source_sql:
+            rebuild = subprocess.run(
+                [cli, str(recovered_path)],
+                stdin=source_sql,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=180,
+            )
+
+        # sqlite3 may report salvage warnings but still produce a usable DB.
+        check = database_quick_check(recovered_path)
+        if check != ["ok"]:
+            return {
+                "ok": False,
+                "error": "Recovered database did not pass quick_check: " + " | ".join(check[:20]),
+                "sqlite_stderr": rebuild.stderr.decode("utf-8", "replace")[-4000:],
+                "backup_folder": str(backup_folder),
+                "recovered_path": str(recovered_path),
+            }
+
+        # Quarantine the corrupt live artifacts, then atomically install recovered DB.
+        quarantine = backup_folder / "quarantined-live"
+        quarantine.mkdir(exist_ok=True)
+        for suffix in ("", "-wal", "-shm"):
+            current = Path(str(DB_PATH) + suffix)
+            if current.exists():
+                shutil.move(str(current), str(quarantine / current.name))
+
+        os.replace(recovered_path, DB_PATH)
+
+        if not safe_init_db():
+            return {
+                "ok": False,
+                "error": DB_STARTUP_ERROR,
+                "backup_folder": str(backup_folder),
+            }
+
+        consistent_database_backup(force=True)
+        return {
+            "ok": True,
+            "message": "SQLite recovery completed and the recovered database passed quick_check.",
+            "backup_folder": str(backup_folder),
+            "quick_check": database_quick_check(),
+        }
+    except Exception as exc:
+        app.logger.exception("Native SQLite recovery failed")
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "backup_folder": str(backup_folder),
+        }
+
+
+safe_init_db()
 
 
 def get_setting(key, default=""):
+    if DB_STARTUP_ERROR:
+        return default
     with connect_db() as con:
         row = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
 
 
 def set_setting(key, value):
+    if DB_STARTUP_ERROR:
+        return
     with connect_db() as con:
         con.execute("""
             INSERT INTO settings(key,value) VALUES(?,?)
@@ -875,10 +983,9 @@ def watch_domains(enabled_only=True):
         return [dict(r) for r in rows]
 
 
-def ignored_source(source_type, sender_email="", domain="", sender_name=""):
+def ignored_source(source_type, sender_email="", domain=""):
     source_type = (source_type or "").strip().lower()
     sender_email = (sender_email or "").strip().lower()
-    sender_name = (sender_name or "").strip().lower()
     domain = normalize_domain(domain or sender_domain(sender_email))
     with connect_db() as con:
         rows = con.execute(
@@ -891,8 +998,6 @@ def ignored_source(source_type, sender_email="", domain="", sender_name=""):
     for row in rows:
         value = (row["value"] or "").strip().lower()
         if row["rule_type"] == "email" and sender_email and sender_email == value:
-            return True
-        if row["rule_type"] == "sender_name" and sender_name and sender_name == value:
             return True
         if row["rule_type"] == "domain" and domain:
             watched = normalize_domain(value)
@@ -1060,28 +1165,6 @@ def parse_address_header(value):
     ]
 
 
-def strip_todd_sent_signature(text):
-    """Remove Todd's known Smart 1 signature before Sent-mail AI analysis."""
-    if not text:
-        return ""
-    lower = text.lower()
-    start = 0
-    while True:
-        idx = lower.find("todd swickard", start)
-        if idx < 0:
-            return text.strip()
-        window = lower[idx:idx + 700]
-        signature_fingerprints = (
-            "chief executive officer" in window
-            and "todd@smart1marketing.com" in window
-            and "614-342-0814" in window
-            and "please use smart 1 team" in window
-        )
-        if signature_fingerprints:
-            return text[:idx].rstrip()
-        start = idx + len("todd swickard")
-
-
 def gmail_parse_message(msg):
     message_id = msg.get("id", "")
     headers = msg.get("payload", {}).get("headers", [])
@@ -1099,12 +1182,6 @@ def gmail_parse_message(msg):
             seen.add(email)
             participants.append(item)
     labels = set(msg.get("labelIds", []) or [])
-    is_sent = "SENT" in labels
-    snippet = msg.get("snippet", "") or ""
-    body = extract_text_part(msg.get("payload", {}))
-    if is_sent:
-        snippet = strip_todd_sent_signature(snippet)
-        body = strip_todd_sent_signature(body)
     return {
         "message_id": message_id,
         "thread_id": msg.get("threadId", ""),
@@ -1112,15 +1189,15 @@ def gmail_parse_message(msg):
         "sender_name": sender_name,
         "sender_email": (sender_email or "").lower(),
         "received": received_datetime(header_value(headers, "Date")),
-        "snippet": snippet,
-        "body": body,
+        "snippet": msg.get("snippet", "") or "",
+        "body": extract_text_part(msg.get("payload", {})),
         "url": f"https://mail.google.com/mail/u/0/#all/{message_id}",
         "to_addresses": to_addresses,
         "cc_addresses": cc_addresses,
         "bcc_addresses": bcc_addresses,
         "participants": participants,
         "recipient_count": len(to_addresses) + len(cc_addresses) + len(bcc_addresses),
-        "is_sent": is_sent,
+        "is_sent": "SENT" in labels,
     }
 
 
@@ -1163,28 +1240,28 @@ def gmail_thread_context(service, thread_id, limit=12, char_budget=14000):
 
 # ---------------- OpenAI structured helpers ----------------
 
-def extract_response_output_text(data):
-    if isinstance(data, dict):
-        direct = data.get("output_text")
-        if isinstance(direct, str) and direct.strip():
-            return direct.strip()
-        for item in data.get("output", []) or []:
-            for content in item.get("content", []) or []:
-                if content.get("type") == "output_text" and isinstance(content.get("text"), str):
-                    return content["text"].strip()
-    return ""
+_OPENAI_CLIENT = None
+_OPENAI_CLIENT_LOCK = threading.Lock()
+
+
+def openai_client():
+    """Reuse one OpenAI HTTP connection pool instead of one client per AI call."""
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is None:
+        with _OPENAI_CLIENT_LOCK:
+            if _OPENAI_CLIENT is None:
+                _OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
+    return _OPENAI_CLIENT
 
 
 def openai_json(prompt, schema, name):
-    """Low-memory Responses API call without importing the OpenAI Python SDK."""
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
-
-    payload = {
-        "model": OPENAI_MODEL,
-        "input": prompt,
-        "store": False,
-        "text": {
+    response = openai_client().responses.create(
+        model=OPENAI_MODEL,
+        input=prompt,
+        store=False,
+        text={
             "format": {
                 "type": "json_schema",
                 "name": name,
@@ -1192,47 +1269,8 @@ def openai_json(prompt, schema, name):
                 "schema": schema,
             }
         },
-    }
-    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    req = urllib_request.Request(
-        "https://api.openai.com/v1/responses",
-        data=encoded,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-            "User-Agent": "Smart1-Client-Action-Center/1.0",
-        },
     )
-
-    try:
-        with urllib_request.urlopen(req, timeout=180) as response:
-            raw = response.read()
-    except urllib_error.HTTPError as exc:
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            detail = str(exc)
-        raise RuntimeError(f"OpenAI API HTTP {exc.code}: {detail[:1200]}") from exc
-    except urllib_error.URLError as exc:
-        raise RuntimeError(f"OpenAI API connection error: {exc.reason}") from exc
-
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError("OpenAI API returned an unreadable response.") from exc
-
-    output_text = extract_response_output_text(data)
-    if not output_text:
-        api_error = data.get("error") if isinstance(data, dict) else None
-        if api_error:
-            raise RuntimeError(f"OpenAI API error: {api_error}")
-        raise RuntimeError("OpenAI response did not contain output text.")
-
-    try:
-        return json.loads(output_text)
-    except Exception as exc:
-        raise RuntimeError(f"OpenAI structured output was not valid JSON: {output_text[:500]}") from exc
+    return json.loads(response.output_text)
 
 
 MEETING_TASK_ITEM_SCHEMA = {
@@ -1538,10 +1576,13 @@ def add_task_participants(con, task_id, participants, source="email"):
         email = (item.get("email") or "").strip().lower()
         if not email:
             continue
-        con.execute(
-            "INSERT OR IGNORE INTO task_participants(task_id,email,display_name,source) VALUES(?,?,?,?)",
-            (task_id, email, (item.get("name") or "").strip(), source),
-        )
+        try:
+            con.execute(
+                "INSERT OR IGNORE INTO task_participants(task_id,email,display_name,source) VALUES(?,?,?,?)",
+                (task_id, email, (item.get("name") or "").strip(), source),
+            )
+        except sqlite3.IntegrityError:
+            pass
 
 
 def task_participant_emails(con, task_id):
@@ -1553,18 +1594,19 @@ def task_participant_emails(con, task_id):
 
 
 def attach_email_update(con, task_id, email, match_method="thread", make_urgent=True):
-    cur = con.execute("""
-        INSERT OR IGNORE INTO task_email_updates
-        (task_id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        task_id, email["message_id"], email["thread_id"], email["sender_name"], email["sender_email"],
-        email["subject"], email["snippet"][:1200], email["received"].isoformat(), email["url"], match_method,
-        "sent" if email.get("is_sent") else "incoming",
-        ", ".join(x.get("email", "") for x in email.get("to_addresses", [])),
-        ", ".join(x.get("email", "") for x in email.get("cc_addresses", [])),
-    ))
-    if cur.rowcount == 0:
+    try:
+        con.execute("""
+            INSERT INTO task_email_updates
+            (task_id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            task_id, email["message_id"], email["thread_id"], email["sender_name"], email["sender_email"],
+            email["subject"], email["snippet"][:1200], email["received"].isoformat(), email["url"], match_method,
+            "sent" if email.get("is_sent") else "incoming",
+            ", ".join(x.get("email", "") for x in email.get("to_addresses", [])),
+            ", ".join(x.get("email", "") for x in email.get("cc_addresses", [])),
+        ))
+    except sqlite3.IntegrityError:
         return False
     add_task_participants(con, task_id, email.get("participants", []), "sent email" if email.get("is_sent") else "incoming email")
     if make_urgent and not email.get("is_sent"):
@@ -1673,7 +1715,7 @@ def sync_gmail():
         # Hard ignore rules run before task matching or OpenAI analysis.
         # This prevents explicitly trained automated sources such as xwf.google.com
         # from creating tasks or making an existing task urgent.
-        if ignored_source("gmail", email.get("sender_email", ""), domain, email.get("sender_name", "")):
+        if ignored_source("gmail", email.get("sender_email", ""), domain):
             with connect_db() as con:
                 record_processed(con, message_id, email["thread_id"], "trained_not_task_source")
             continue
@@ -1735,7 +1777,7 @@ def sync_gmail():
                 if analysis.get("actionable") and classification != "ignore":
                     try:
                         cur = con.execute("""
-                            INSERT OR IGNORE INTO gmail_suggestions
+                            INSERT INTO gmail_suggestions
                             (gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,
                              suggested_title,suggested_category,suggested_priority,suggested_due_date,suggested_summary,
                              suggested_reply,payment_amount,currency,invoice_number,invoice_sent,confidence,reason,
@@ -1753,8 +1795,6 @@ def sync_gmail():
                             analysis.get("gpt_help_reason", ""), int(email.get("recipient_count", 0) or 0),
                             json.dumps(email.get("participants", []))
                         ))
-                        if cur.rowcount == 0:
-                            continue
                         suggestion_id = cur.lastrowid
                         added += 1
                         should_auto_add = get_setting("gmail_auto_add", "0") == "1"
@@ -1773,8 +1813,8 @@ def sync_gmail():
                                     (task_id, "Invoice automatically added to Finances / Bills to Pay from Gmail.")
                                 )
                             auto_added += 1
-                    except Exception as exc:
-                        set_setting("gmail_last_error", f"Message processing error: {exc}")
+                    except sqlite3.IntegrityError:
+                        pass
 
         if related_task_id:
             if related_attached:
@@ -2120,11 +2160,14 @@ def store_meeting_review(email, analysis, analyzer):
     if not tasks:
         return False
     with connect_db() as con:
-        cur = con.execute("""
-            INSERT OR IGNORE INTO meeting_reviews(source_message_id,gmail_thread_id,meeting_title,summary,tasks_json,email_url,received_at,analyzer,state)
-            VALUES (?,?,?,?,?,?,?,?,'new')
-        """, (email["message_id"], email["thread_id"], analysis.get("meeting_title", "") or email.get("subject", "Meeting summary"), analysis.get("meeting_summary", ""), json.dumps(tasks), email.get("url", ""), email["received"].isoformat(), analyzer))
-        return cur.rowcount > 0
+        try:
+            con.execute("""
+                INSERT INTO meeting_reviews(source_message_id,gmail_thread_id,meeting_title,summary,tasks_json,email_url,received_at,analyzer,state)
+                VALUES (?,?,?,?,?,?,?,?,'new')
+            """, (email["message_id"], email["thread_id"], analysis.get("meeting_title", "") or email.get("subject", "Meeting summary"), analysis.get("meeting_summary", ""), json.dumps(tasks), email.get("url", ""), email["received"].isoformat(), analyzer))
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
 def looks_like_meeting_recap(email):
@@ -2480,28 +2523,6 @@ def sync_sent_mail():
             if con.execute("SELECT 1 FROM sent_monitors WHERE gmail_message_id=?", (message_id,)).fetchone():
                 continue
         email = gmail_get_full(service, message_id)
-        sent_recipient_names = {
-            (x.get("name") or "").strip().lower()
-            for x in (email.get("to_addresses", []) + email.get("cc_addresses", []) + email.get("bcc_addresses", []))
-        }
-        if "quickbooks payments" in sent_recipient_names:
-            with connect_db() as con:
-                con.execute(
-                    """
-                    INSERT OR IGNORE INTO sent_monitors
-                    (gmail_message_id,gmail_thread_id,task_id,recipients,subject,sent_at,followup_due,state,reason,email_url,party,summary,priority,recipient_count)
-                    VALUES (?,?,?,?,?,?,?,'ignored',?,?,?,?,?,?)
-                    """,
-                    (
-                        message_id, email["thread_id"], 0,
-                        ", ".join(x.get("email","") for x in email.get("to_addresses", []) if x.get("email")),
-                        email.get("subject",""), email["received"].isoformat(), "",
-                        "QuickBooks Payments is an ignored follow-up source.",
-                        email.get("url",""), "QuickBooks Payments", "", "normal",
-                        int(email.get("recipient_count",0) or 0),
-                    )
-                )
-            continue
         if int(email.get("recipient_count", 0) or 0) >= 2 and email.get("thread_id"):
             email["thread_context"] = gmail_thread_context(service, email["thread_id"], limit=14, char_budget=16000)
         analysis = None
@@ -2815,17 +2836,18 @@ CANDIDATE TASKS
 def attach_chat_update(con, task_id, msg, space, match_method="chat thread", make_urgent=True):
     name = msg.get("name", "")
     sender = msg.get("sender", {}) or {}
-    cur = con.execute(
-        """
-        INSERT OR IGNORE INTO task_chat_updates
-        (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'incoming')
-        """,
-        (task_id, name, space.get("name", ""), space.get("displayName", "") or space.get("spaceType", ""),
-         sender.get("displayName", "") or sender.get("name", ""), chat_message_text(msg)[:5000],
-         msg.get("createTime", ""), match_method, chat_thread_name(msg), space.get("spaceUri", ""))
-    )
-    if cur.rowcount == 0:
+    try:
+        con.execute(
+            """
+            INSERT INTO task_chat_updates
+            (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction)
+            VALUES (?,?,?,?,?,?,?,?,?,?,'incoming')
+            """,
+            (task_id, name, space.get("name", ""), space.get("displayName", "") or space.get("spaceType", ""),
+             sender.get("displayName", "") or sender.get("name", ""), chat_message_text(msg)[:5000],
+             msg.get("createTime", ""), match_method, chat_thread_name(msg), space.get("spaceUri", ""))
+        )
+    except sqlite3.IntegrityError:
         return False
     if make_urgent:
         con.execute(
@@ -2931,7 +2953,7 @@ def sync_google_chat():
                 try:
                     con.execute(
                         """
-                        INSERT OR IGNORE INTO chat_suggestions
+                        INSERT INTO chat_suggestions
                         (message_name,space_name,space_display_name,sender_user_name,sender_display_name,message_text,
                          create_time,suggested_title,suggested_category,suggested_priority,suggested_due_date,
                          suggested_summary,suggested_reply,confidence,reason,gpt_can_help,gpt_help_prompt,gpt_help_reason,
@@ -2948,12 +2970,9 @@ def sync_google_chat():
                          float(analysis.get("payment_amount", 0) or 0), analysis.get("currency", "USD") or "USD",
                          analysis.get("invoice_number", ""))
                     )
-                    if cur.rowcount > 0:
-                        added += 1
-                except Exception as exc:
-                    space_errors.append(
-                        f"{space.get('displayName') or space.get('name')}: message processing error: {exc}"
-                    )
+                    added += 1
+                except sqlite3.IntegrityError:
+                    pass
     set_setting("chat_last_sync", datetime.now().astimezone().isoformat())
     set_setting("chat_last_error", space_errors[0] if space_errors else "")
     return {
@@ -2975,13 +2994,6 @@ def create_or_update_gpt_help(task_id):
         task = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if not task:
         raise RuntimeError("Task not found.")
-    if (task["gpt_help_prompt"] or "").strip():
-        return {
-            "can_help": bool(task["gpt_can_help"]),
-            "prompt": task["gpt_help_prompt"],
-            "reason": task["gpt_help_reason"] or "",
-            "cached": True,
-        }
     prompt = f"""
 Decide whether GPT can materially help Todd complete this business task itself, rather than merely remind him.
 Examples: draft or rewrite content, analyze information, research a defined topic, write code, troubleshoot from supplied evidence,
@@ -3014,7 +3026,7 @@ def sync_all_communications():
             set_setting("gmail_last_error", str(exc))
             result["gmail"] = {"error": str(exc)}
         finally:
-            release_process_memory()
+            gc.collect()
 
         try:
             result["meetings"] = sync_meeting_recaps()
@@ -3022,7 +3034,7 @@ def sync_all_communications():
             set_setting("meeting_last_error", str(exc))
             result["meetings"] = {"error": str(exc)}
         finally:
-            release_process_memory()
+            gc.collect()
 
         try:
             result["sent"] = sync_sent_mail()
@@ -3030,7 +3042,7 @@ def sync_all_communications():
             set_setting("sent_last_error", str(exc))
             result["sent"] = {"error": str(exc)}
         finally:
-            release_process_memory()
+            gc.collect()
 
         try:
             result["chat"] = sync_google_chat()
@@ -3038,8 +3050,12 @@ def sync_all_communications():
             set_setting("chat_last_error", str(exc))
             result["chat"] = {"error": str(exc)}
         finally:
-            release_process_memory()
+            gc.collect()
 
+        try:
+            consistent_database_backup()
+        except Exception:
+            app.logger.exception("Post-sync SQLite backup failed")
         return result
     finally:
         SYNC_LOCK.release()
@@ -3067,20 +3083,7 @@ def manual_sync_worker():
         with MANUAL_SYNC_STATE_LOCK:
             MANUAL_SYNC_STATE["running"] = False
             MANUAL_SYNC_STATE["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        release_process_memory()
-
-
-def release_process_memory():
-    """Best-effort release of Python objects and freed glibc heap pages back to Render."""
-    gc.collect()
-    try:
-        import ctypes
-        libc = ctypes.CDLL("libc.so.6")
-        trim = getattr(libc, "malloc_trim", None)
-        if trim:
-            trim(0)
-    except Exception:
-        pass
+        gc.collect()
 
 
 # ---------------- Background sync ----------------
@@ -3094,7 +3097,7 @@ def background_sync_loop():
         except Exception as exc:
             set_setting("gmail_last_error", str(exc))
         finally:
-            release_process_memory()
+            gc.collect()
         time.sleep(max(60, AUTO_GMAIL_SYNC_MINUTES * 60))
 
 
@@ -3104,47 +3107,38 @@ if AUTO_GMAIL_SYNC_MINUTES > 0 and os.environ.get("DISABLE_BACKGROUND_GMAIL_SYNC
 
 # ---------------- Serialization ----------------
 
-def task_activity_counts(con, task_id):
-    row = con.execute(
-        """
-        SELECT
-          (SELECT COUNT(*) FROM notes WHERE task_id=?) AS notes_count,
-          (SELECT COUNT(*) FROM task_research_logs WHERE task_id=?) AS research_count,
-          (SELECT COUNT(*) FROM task_email_updates WHERE task_id=?) AS email_updates_count,
-          (SELECT COUNT(*) FROM task_chat_updates WHERE task_id=?) AS chat_updates_count
-        """,
-        (task_id, task_id, task_id, task_id)
-    ).fetchone()
-    return dict(row)
-
-
-def serialize_task_activity(task_id, con):
+def serialize_task(row, con):
     notes = con.execute(
-        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 25",
-        (task_id,)
+        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 8", (row["id"],)
     ).fetchall()
     research = con.execute(
-        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 15",
-        (task_id,)
+        "SELECT id,question,answer,confidence,sources_json,created_at FROM task_research_logs WHERE task_id=? ORDER BY id DESC LIMIT 4",
+        (row["id"],)
     ).fetchall()
     updates = con.execute(
-        """
-        SELECT id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,
-               received_at,email_url,match_method,direction,to_emails,cc_emails,created_at
-        FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 25
-        """,
-        (task_id,)
+        "SELECT id,gmail_message_id,gmail_thread_id,sender_name,sender_email,subject,snippet,received_at,email_url,match_method,direction,to_emails,cc_emails,created_at "
+        "FROM task_email_updates WHERE task_id=? ORDER BY id DESC LIMIT 6",
+        (row["id"],)
     ).fetchall()
     chat_updates = con.execute(
-        """
-        SELECT id,message_name,space_name,space_display_name,sender_display_name,message_text,
-               create_time,match_method,thread_name,space_uri,direction,created_at
-        FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 25
-        """,
-        (task_id,)
+        "SELECT id,message_name,space_name,space_display_name,sender_display_name,message_text,create_time,match_method,thread_name,space_uri,direction,created_at "
+        "FROM task_chat_updates WHERE task_id=? ORDER BY id DESC LIMIT 8",
+        (row["id"],)
     ).fetchall()
-
-    research_logs = []
+    participants = con.execute(
+        "SELECT email,display_name,source FROM task_participants WHERE task_id=? ORDER BY id",
+        (row["id"],)
+    ).fetchall()
+    resolution_rows = con.execute(
+        "SELECT id,source_type,source_id,summary,confidence,sources_json,state,source_url,created_at,decided_at "
+        "FROM task_resolution_reviews WHERE task_id=? ORDER BY id DESC LIMIT 8",
+        (row["id"],)
+    ).fetchall()
+    item = dict(row)
+    if not item.get("source_received_at"):
+        item["source_received_at"] = item.get("created_at", "")
+    item["notes"] = [dict(n) for n in notes]
+    item["research_logs"] = []
     for r in research:
         d = dict(r)
         try:
@@ -3152,51 +3146,10 @@ def serialize_task_activity(task_id, con):
         except Exception:
             d["sources"] = []
             d.pop("sources_json", None)
-        research_logs.append(d)
-
-    task = con.execute(
-        """
-        SELECT id,detail,suggested_reply,gpt_help_prompt,gpt_can_help,email_to,email_subject
-        FROM tasks WHERE id=?
-        """,
-        (task_id,)
-    ).fetchone()
-
-    return {
-        "task_id": task_id,
-        "notes": [dict(n) for n in notes],
-        "research_logs": research_logs,
-        "email_updates": [dict(u) for u in updates],
-        "chat_updates": [dict(u) for u in chat_updates],
-        "detail": task["detail"] if task else "",
-        "suggested_reply": task["suggested_reply"] if task else "",
-        "gpt_help_prompt": task["gpt_help_prompt"] if task else "",
-        "gpt_can_help": bool(task["gpt_can_help"]) if task else False,
-        "email_to": task["email_to"] if task else "",
-        "email_subject": task["email_subject"] if task else "",
-    }
-
-
-def serialize_task(row, con, compact=False):
-    item = dict(row)
-    if not item.get("source_received_at"):
-        item["source_received_at"] = item.get("created_at", "")
-
-    participants = con.execute(
-        "SELECT email,display_name,source FROM task_participants WHERE task_id=? ORDER BY id",
-        (row["id"],)
-    ).fetchall()
+        item["research_logs"].append(d)
+    item["email_updates"] = [dict(u) for u in updates]
+    item["chat_updates"] = [dict(u) for u in chat_updates]
     item["participants"] = [dict(u) for u in participants]
-
-    resolution_rows = con.execute(
-        """
-        SELECT id,source_type,source_id,summary,confidence,sources_json,state,source_url,created_at,decided_at
-        FROM task_resolution_reviews
-        WHERE task_id=? AND state='pending'
-        ORDER BY id DESC LIMIT 2
-        """,
-        (row["id"],)
-    ).fetchall()
     item["resolution_reviews"] = []
     for r in resolution_rows:
         d = dict(r)
@@ -3206,27 +3159,6 @@ def serialize_task(row, con, compact=False):
             d["sources"] = []
             d.pop("sources_json", None)
         item["resolution_reviews"].append(d)
-
-    if compact:
-        item.update(task_activity_counts(con, row["id"]))
-        item["notes"] = []
-        item["research_logs"] = []
-        item["email_updates"] = []
-        item["chat_updates"] = []
-        item["gpt_prompt_prepared"] = bool(item.get("gpt_help_prompt"))
-        item["gpt_help_prompt"] = ""
-        item["suggested_reply"] = ""
-        detail = item.get("detail") or ""
-        item["detail_truncated"] = len(detail) > 1800
-        if len(detail) > 1800:
-            item["detail"] = detail[:1800].rstrip() + "…"
-        return item
-
-    activity = serialize_task_activity(row["id"], con)
-    item["notes"] = activity["notes"]
-    item["research_logs"] = activity["research_logs"]
-    item["email_updates"] = activity["email_updates"]
-    item["chat_updates"] = activity["chat_updates"]
     return item
 
 
@@ -3234,44 +3166,11 @@ def serialize_task(row, con, compact=False):
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True})
-
-
-def linux_memory_status():
-    result = {
-        "rss_mb": 0.0, "peak_rss_mb": 0.0, "database_mb": 0.0,
-        "memory_limit_mb": 0, "rss_percent": 0.0,
-    }
-    try:
-        values = {}
-        with open("/proc/self/status", "r", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith(("VmRSS:", "VmHWM:")):
-                    key, value = line.split(":", 1)
-                    values[key] = float(value.strip().split()[0]) / 1024.0
-        result["rss_mb"] = round(values.get("VmRSS", 0.0), 1)
-        result["peak_rss_mb"] = round(values.get("VmHWM", 0.0), 1)
-    except Exception:
-        pass
-    try:
-        result["database_mb"] = round(DB_PATH.stat().st_size / (1024 * 1024), 2)
-    except Exception:
-        pass
-    try:
-        result["memory_limit_mb"] = int(os.environ.get("APP_MEMORY_LIMIT_MB", "512"))
-    except Exception:
-        result["memory_limit_mb"] = 512
-    if result["memory_limit_mb"]:
-        result["rss_percent"] = round(result["rss_mb"] / result["memory_limit_mb"] * 100, 1)
-    return result
-
-
-@app.get("/api/diagnostics/memory")
-@login_required
-def memory_diagnostics():
-    status = linux_memory_status()
-    status["database_backend"] = "postgresql" if using_postgres() else "sqlite"
-    return jsonify(status)
+    return jsonify({
+        "ok": True,
+        "database_ok": not bool(DB_STARTUP_ERROR),
+        "database_error": DB_STARTUP_ERROR,
+    })
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -3297,7 +3196,62 @@ def logout():
 @app.get("/")
 @login_required
 def index():
+    if DB_STARTUP_ERROR:
+        return redirect(url_for("database_recovery_page"))
     return render_template("index.html")
+
+
+@app.get("/database-recovery")
+@login_required
+def database_recovery_page():
+    status = {
+        "error": DB_STARTUP_ERROR,
+        "db_path": str(DB_PATH),
+        "db_exists": DB_PATH.exists(),
+        "db_size": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+        "quick_check": database_quick_check(),
+        "sqlite3_cli": native_sqlite3_path() or "",
+        "backups": [
+            {
+                "name": p.name,
+                "size": p.stat().st_size,
+                "modified": datetime.fromtimestamp(p.stat().st_mtime).astimezone().isoformat(timespec="seconds"),
+            }
+            for p in sorted(DB_BACKUP_DIR.glob("**/*"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if p.is_file()
+        ][:30],
+    }
+    return render_template("recovery.html", status=status)
+
+
+@app.get("/api/database/recovery/status")
+@login_required
+def database_recovery_status():
+    return jsonify({
+        "database_error": DB_STARTUP_ERROR,
+        "db_path": str(DB_PATH),
+        "db_exists": DB_PATH.exists(),
+        "db_size": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+        "quick_check": database_quick_check(),
+        "sqlite3_cli": native_sqlite3_path() or "",
+    })
+
+
+@app.post("/api/database/recovery/backup")
+@login_required
+def database_recovery_backup():
+    try:
+        folder, copied = copy_database_artifacts("manual-backup")
+        return jsonify({"ok": True, "folder": str(folder), "copied": copied})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+
+@app.post("/api/database/recovery/attempt")
+@login_required
+def database_recovery_attempt():
+    result = attempt_native_sqlite_recovery()
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 
 def google_oauth_error_page(title, detail, status=400):
@@ -3545,38 +3499,6 @@ def gmail_sync_endpoint():
 @app.post("/api/communications/sync")
 @login_required
 def communications_sync_endpoint():
-    if using_postgres():
-        with connect_db() as con:
-            existing = con.execute(
-                """
-                SELECT id,state FROM sync_jobs
-                WHERE state IN ('queued','running')
-                ORDER BY id DESC LIMIT 1
-                """
-            ).fetchone()
-            if existing:
-                return jsonify({
-                    "busy": True,
-                    "running": True,
-                    "job_id": existing["id"],
-                    "message": "A communications sync is already queued or running.",
-                }), 202
-
-            cur = con.execute(
-                """
-                INSERT INTO sync_jobs(state,requested_by)
-                VALUES('queued','dashboard')
-                """
-            )
-            job_id = cur.lastrowid
-        return jsonify({
-            "started": True,
-            "running": True,
-            "job_id": job_id,
-            "message": "Sync queued for the communications worker.",
-        }), 202
-
-    # SQLite fallback/local mode.
     with MANUAL_SYNC_STATE_LOCK:
         if MANUAL_SYNC_STATE["running"]:
             return jsonify({
@@ -3603,34 +3525,6 @@ def communications_sync_endpoint():
 @app.get("/api/communications/sync/status")
 @login_required
 def communications_sync_status():
-    if using_postgres():
-        with connect_db() as con:
-            job = con.execute(
-                "SELECT * FROM sync_jobs ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        if not job:
-            return jsonify({
-                "running": False,
-                "started_at": "",
-                "finished_at": "",
-                "error": "",
-                "result": {},
-            })
-        try:
-            result = json.loads(job["result_json"] or "{}")
-        except Exception:
-            result = {}
-        return jsonify({
-            "job_id": job["id"],
-            "running": job["state"] in {"queued", "running"},
-            "queued": job["state"] == "queued",
-            "state": job["state"],
-            "started_at": job["started_at"],
-            "finished_at": job["finished_at"],
-            "error": job["error"],
-            "result": result,
-        })
-
     with MANUAL_SYNC_STATE_LOCK:
         return jsonify(dict(MANUAL_SYNC_STATE))
 
@@ -3849,14 +3743,8 @@ def list_sent_followups():
 @login_required
 def dismiss_sent_followup(monitor_id):
     with connect_db() as con:
-        exists = con.execute("SELECT id,state FROM sent_monitors WHERE id=?", (monitor_id,)).fetchone()
-        if not exists:
-            return jsonify({"error": "Follow-up item not found."}), 404
-        con.execute(
-            "UPDATE sent_monitors SET state='dismissed',followup_due='' WHERE id=?",
-            (monitor_id,)
-        )
-    return jsonify({"ok": True, "id": monitor_id, "state": "dismissed"})
+        con.execute("UPDATE sent_monitors SET state='dismissed' WHERE id=?", (monitor_id,))
+    return jsonify({"ok": True})
 
 
 @app.post("/api/sent-followups/<int:monitor_id>/create-task")
@@ -4216,7 +4104,7 @@ def list_tasks():
             WHERE {' AND '.join(where)}
             ORDER BY CASE WHEN due_date='' THEN 1 ELSE 0 END, due_date ASC, party ASC
         """, params).fetchall()
-        return jsonify([serialize_task(r, con, compact=True) for r in rows])
+        return jsonify([serialize_task(r, con) for r in rows])
 
 
 
@@ -4238,7 +4126,7 @@ def invoice_register():
               id DESC
             """
         ).fetchall()
-        return jsonify([serialize_task(r, con, compact=True) for r in rows])
+        return jsonify([serialize_task(r, con) for r in rows])
 
 
 
@@ -4268,7 +4156,7 @@ def dashboard_counts():
             "chat": con.execute(
                 """
                 SELECT COUNT(*) FROM chat_suggestions
-                WHERE state='new' AND lower(trim(space_display_name)) NOT IN ('sales team to me','client success')
+                WHERE state='new' AND lower(trim(space_display_name))<>'sales team to me'
                 """
             ).fetchone()[0],
             "meetings": con.execute(
@@ -4327,26 +4215,6 @@ def create_task():
         ))
         row = con.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
         return jsonify(serialize_task(row, con)), 201
-
-
-
-@app.get("/api/tasks/<int:task_id>")
-@login_required
-def get_task_detail(task_id):
-    with connect_db() as con:
-        row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if not row:
-            return jsonify({"error": "Task not found"}), 404
-        return jsonify(serialize_task(row, con, compact=False))
-
-
-@app.get("/api/tasks/<int:task_id>/activity")
-@login_required
-def get_task_activity(task_id):
-    with connect_db() as con:
-        if not con.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
-            return jsonify({"error": "Task not found"}), 404
-        return jsonify(serialize_task_activity(task_id, con))
 
 
 @app.patch("/api/tasks/<int:task_id>")
@@ -4452,17 +4320,20 @@ def send_chat_reply(task_id):
 
     with connect_db() as con:
         stored_name = message_name or f"local-sent-{task_id}-{int(time.time())}"
-        con.execute(
-            """
-            INSERT OR IGNORE INTO task_chat_updates
-            (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,
-             create_time,match_method,thread_name,space_uri,direction)
-            VALUES (?,?,?,?,?,?,?,?,?,?,'outgoing')
-            """,
-            (task_id, stored_name, space_name, task["party"] or "Google Chat",
-             "Todd / Smart 1", text, create_time, "sent from Action Center",
-             sent_thread, space_uri)
-        )
+        try:
+            con.execute(
+                """
+                INSERT INTO task_chat_updates
+                (task_id,message_name,space_name,space_display_name,sender_display_name,message_text,
+                 create_time,match_method,thread_name,space_uri,direction)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'outgoing')
+                """,
+                (task_id, stored_name, space_name, task["party"] or "Google Chat",
+                 "Todd / Smart 1", text, create_time, "sent from Action Center",
+                 sent_thread, space_uri)
+            )
+        except sqlite3.IntegrityError:
+            pass
         if message_name:
             chat_record_processed(con, message_name, space_name, "outgoing_task_reply")
         con.execute(

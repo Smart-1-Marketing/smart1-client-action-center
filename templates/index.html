@@ -2,10 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#2563eb">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="S1 Action Center">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Smart 1 Client Action Center</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
@@ -170,8 +167,6 @@
       <div class="setting-row"><span>Auto-add incoming invoices to Finances</span><span class="pill ok">Always On</span></div>
       <div class="setting-row"><span>Ignore Gmail source</span><strong>xwf.google.com</strong></div>
       <div class="setting-row"><span>Ignore Google Chat space</span><strong>Sales Team to Me</strong></div>
-      <div class="setting-row"><span>Ignore Google Chat space</span><strong>Client Success</strong></div>
-      <div class="setting-row"><span>Ignore source</span><strong>QuickBooks Payments</strong></div>
     </div>
     <div class="row">
       <button id="watchDomainsBtn" class="button secondary">Watch Domains</button>
@@ -233,11 +228,6 @@
         <strong>AI Analyzer</strong>
         <span id="aiSimpleState" class="pill neutral">Checking…</span>
         <span id="aiSimpleDetail" class="helper"></span>
-      </div>
-      <div class="diagnostic-system-row">
-        <strong>Render Memory</strong>
-        <span id="memoryState" class="pill neutral">Check…</span>
-        <span id="memoryDetail" class="helper"></span>
       </div>
     </div>
 

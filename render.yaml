@@ -1,12 +1,3 @@
-databases:
-  - name: smart1-action-center-db
-    region: ohio
-    plan: basic-256mb
-    postgresMajorVersion: "18"
-    databaseName: smart1_action_center
-    user: smart1_action_center
-    connectionPool: pgbouncer
-
 services:
   - type: web
     name: smart1-client-action-center
@@ -18,22 +9,8 @@ services:
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: smart1-action-center-db
-          property: connectionPoolString
       - key: DATA_DIR
         value: /var/data
-      - key: MIGRATE_SQLITE_TO_POSTGRES
-        value: "1"
-      - key: DISABLE_BACKGROUND_GMAIL_SYNC
-        value: "1"
-      - key: APP_MEMORY_LIMIT_MB
-        value: "512"
-      - key: MALLOC_ARENA_MAX
-        value: "2"
-      - key: MALLOC_TRIM_THRESHOLD_
-        value: "131072"
       - key: SECRET_KEY
         generateValue: true
       - key: APP_PASSWORD
@@ -53,11 +30,11 @@ services:
       - key: GMAIL_SYNC_QUERY
         value: "newer_than:30d -in:sent -in:drafts -in:spam -in:trash -category:promotions -category:social -category:forums"
       - key: GMAIL_SCAN_MAX_MESSAGES
-        value: "300"
+        value: "500"
       - key: GMAIL_ANALYZE_MAX_NEW
-        value: "25"
+        value: "40"
       - key: OPENAI_EMAIL_BODY_CHARS
-        value: "6000"
+        value: "8000"
       - key: EMAIL_RESEARCH_MAX_MESSAGES
         value: "500"
       - key: EMAIL_DISCOVERY_MAX_MESSAGES
@@ -69,87 +46,18 @@ services:
       - key: SENT_FOLLOWUP_AFTER_DAYS
         value: "3"
       - key: SENT_SCAN_MAX_MESSAGES
-        value: "120"
+        value: "200"
       - key: CHAT_SYNC_LOOKBACK_DAYS
         value: "30"
       - key: CHAT_SCAN_MAX_SPACES
-        value: "60"
+        value: "100"
       - key: CHAT_SCAN_MAX_MESSAGES_PER_SPACE
-        value: "50"
+        value: "75"
       - key: WATCH_DOMAIN_LOOKBACK_DAYS
         value: "90"
       - key: AI_CONTEXT_CHAR_BUDGET
-        value: "45000"
-    # KEEP THIS DISK FOR THE FIRST POSTGRES DEPLOY ONLY.
-    # The web process reads /var/data/tasks.db once and migrates it to Postgres.
+        value: "60000"
     disk:
       name: smart1-action-data
       mountPath: /var/data
       sizeGB: 1
-
-  - type: worker
-    name: smart1-action-center-worker
-    runtime: python
-    region: ohio
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: python worker.py
-    autoDeployTrigger: commit
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: smart1-action-center-db
-          property: connectionPoolString
-      - key: DISABLE_BACKGROUND_GMAIL_SYNC
-        value: "1"
-      - key: MIGRATE_SQLITE_TO_POSTGRES
-        value: "0"
-      - key: WORKER_STARTUP_SYNC
-        value: "1"
-      - key: WORKER_POLL_SECONDS
-        value: "10"
-      - key: APP_MEMORY_LIMIT_MB
-        value: "512"
-      - key: MALLOC_ARENA_MAX
-        value: "2"
-      - key: MALLOC_TRIM_THRESHOLD_
-        value: "131072"
-      - key: OPENAI_API_KEY
-        fromService:
-          type: web
-          name: smart1-client-action-center
-          envVarKey: OPENAI_API_KEY
-      - key: OPENAI_MODEL
-        value: gpt-5-mini
-      - key: AUTO_GMAIL_SYNC_MINUTES
-        value: "15"
-      - key: GMAIL_SYNC_QUERY
-        value: "newer_than:30d -in:sent -in:drafts -in:spam -in:trash -category:promotions -category:social -category:forums"
-      - key: GMAIL_SCAN_MAX_MESSAGES
-        value: "300"
-      - key: GMAIL_ANALYZE_MAX_NEW
-        value: "25"
-      - key: OPENAI_EMAIL_BODY_CHARS
-        value: "6000"
-      - key: EMAIL_RESEARCH_MAX_MESSAGES
-        value: "500"
-      - key: EMAIL_DISCOVERY_MAX_MESSAGES
-        value: "100"
-      - key: EMAIL_DISCOVERY_LOOKBACK_DAYS
-        value: "0"
-      - key: SENT_MONITOR_LOOKBACK_DAYS
-        value: "30"
-      - key: SENT_FOLLOWUP_AFTER_DAYS
-        value: "3"
-      - key: SENT_SCAN_MAX_MESSAGES
-        value: "120"
-      - key: CHAT_SYNC_LOOKBACK_DAYS
-        value: "30"
-      - key: CHAT_SCAN_MAX_SPACES
-        value: "60"
-      - key: CHAT_SCAN_MAX_MESSAGES_PER_SPACE
-        value: "50"
-      - key: WATCH_DOMAIN_LOOKBACK_DAYS
-        value: "90"
-      - key: AI_CONTEXT_CHAR_BUDGET
-        value: "45000"
