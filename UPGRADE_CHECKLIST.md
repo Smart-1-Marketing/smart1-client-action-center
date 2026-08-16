@@ -189,3 +189,15 @@ After deploy:
 4. Click **Create Safety Copy** first.
 5. If the page says native sqlite3 recovery is available, click **Attempt Database Recovery**.
 6. If sqlite3 recovery is unavailable, use the Render disk snapshot from before the corruption or recover the copied DB externally.
+## One-row controls update
+
+Replace:
+```text
+templates/index.html
+static/app.js
+static/style.css
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+No database or Render setting change is required.

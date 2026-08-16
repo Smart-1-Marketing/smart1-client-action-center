@@ -549,3 +549,20 @@ SQLite is configured with:
 - `synchronous=FULL`
 - `busy_timeout=30000`
 - `wal_autocheckpoint=500`
+## One-row task controls
+
+Desktop task controls now stay on one row:
+
+```text
+Search | Status | Sort | + Add Task
+```
+
+Sort options:
+- Due Date
+- Date Received — Newest
+- Date Received — Oldest
+- Company — A to Z
+- Company — Z to A
+- Priority
+
+Company sorting uses the task's company/client/vendor (`party`) field.

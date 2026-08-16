@@ -149,3 +149,44 @@ dialog{border:none;border-radius:16px;padding:0;width:min(720px,calc(100% - 30px
   .compact-header-actions{width:100%;overflow-x:auto;justify-content:flex-start;padding-bottom:4px}
   .sync-status{display:none}
 }
+
+
+/* Compact one-row task filters */
+.compact-task-controls{
+  display:grid;
+  grid-template-columns:minmax(380px,1fr) minmax(170px,210px) minmax(220px,260px) auto auto;
+  gap:12px;
+  align-items:end;
+}
+.compact-task-controls label{
+  margin:0;
+}
+.compact-task-controls input,
+.compact-task-controls select{
+  width:100%;
+}
+.task-add,
+.task-clear{
+  min-height:46px;
+  align-self:end;
+  white-space:nowrap;
+}
+@media(max-width:1150px){
+  .compact-task-controls{
+    grid-template-columns:minmax(300px,1fr) 180px 230px auto;
+  }
+  .task-clear{
+    grid-column:1 / -1;
+    justify-self:start;
+  }
+}
+@media(max-width:780px){
+  .compact-task-controls{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:end;
+  }
+  .task-search{flex:1 1 100%}
+  .task-status,
+  .task-sort{flex:1 1 220px}
+}

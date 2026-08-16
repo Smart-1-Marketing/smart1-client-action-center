@@ -110,15 +110,29 @@ function getTask(id){return [...state.client,...state.payment,...state.history].
 function sortTasks(rows){
   const mode=state.sortBy||"due";
   const received=t=>String(t.source_received_at||t.created_at||"");
+  const company=t=>String(t.party||"").trim().toLowerCase();
   const priorityRank={urgent:0,high:1,normal:2};
+
   return [...rows].sort((a,b)=>{
     if(mode==="received-newest")return received(b).localeCompare(received(a));
     if(mode==="received-oldest")return received(a).localeCompare(received(b));
+
+    if(mode==="company-az"){
+      const d=company(a).localeCompare(company(b));
+      return d!==0?d:received(b).localeCompare(received(a));
+    }
+
+    if(mode==="company-za"){
+      const d=company(b).localeCompare(company(a));
+      return d!==0?d:received(b).localeCompare(received(a));
+    }
+
     if(mode==="priority"){
       const d=(priorityRank[a.priority]??9)-(priorityRank[b.priority]??9);
       if(d!==0)return d;
       return received(b).localeCompare(received(a));
     }
+
     if(a.due_date&&b.due_date)return a.due_date.localeCompare(b.due_date);
     if(a.due_date)return -1;
     if(b.due_date)return 1;

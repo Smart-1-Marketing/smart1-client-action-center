@@ -88,21 +88,32 @@
 
   <section id="completedView" class="view hidden"></section>
 
-  <section id="taskControls" class="filters">
-    <label>Search<input id="search" type="search" placeholder="Search task, client, vendor, assignee or participant"></label>
-    <label>Status
-      <select id="statusFilter"><option value="all">All Statuses</option><option>Open</option><option>Working</option><option>Waiting</option><option>Blocked</option><option>Completed</option></select>
+  <section id="taskControls" class="filters compact-task-controls">
+    <label class="task-search">Search
+      <input id="search" type="search" placeholder="Search task, company, vendor, assignee or participant">
     </label>
-    <label>Sort
+    <label class="task-status">Status
+      <select id="statusFilter">
+        <option value="all">All Statuses</option>
+        <option>Open</option>
+        <option>Working</option>
+        <option>Waiting</option>
+        <option>Blocked</option>
+        <option>Completed</option>
+      </select>
+    </label>
+    <label class="task-sort">Sort
       <select id="sortBy">
         <option value="due">Due Date</option>
         <option value="received-newest">Date Received — Newest</option>
         <option value="received-oldest">Date Received — Oldest</option>
+        <option value="company-az">Company — A to Z</option>
+        <option value="company-za">Company — Z to A</option>
         <option value="priority">Priority</option>
       </select>
     </label>
-    <div class="filter-button"><button id="clearQuickFilter" class="button secondary hidden">Clear Scorecard Filter</button></div>
-    <div class="filter-button"><button id="addTaskBtn" class="button secondary">+ Add Task</button></div>
+    <button id="addTaskBtn" class="button secondary task-add">+ Add Task</button>
+    <button id="clearQuickFilter" class="button secondary hidden task-clear">Clear Filter</button>
   </section>
 
   <section id="newTaskPanel" class="panel hidden">
