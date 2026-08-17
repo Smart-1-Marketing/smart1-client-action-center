@@ -1,7 +1,7 @@
 const state={
-  tab:"client", client:[], payment:[], invoice:[], history:[], gmailSuggestions:[], chatSuggestions:[],
-  sentFollowups:[], meetingReviews:[], summary:{}, system:null, currentReply:null,currentChatReply:null, quickFilter:"", sentQuick:"all",
-  discoveryTasks:[], watchDomains:[], sortBy:"due", counts:{}, syncPoll:null
+  tab:"client", client:[], payment:[], invoice:[], paidAccounts:[], history:[], gmailSuggestions:[], chatSuggestions:[],
+  sentFollowups:[], meetingReviews:[], summary:{}, system:null, currentReply:null,currentChatReply:null, quickFilter:"", sentQuick:"all", invoiceAge:"all",
+  discoveryTasks:[], watchDomains:[], sortBy:"due", counts:{}, syncPoll:null, orgExpanded:{}
 };
 const el=id=>document.getElementById(id);
 const TODAY=new Date().toISOString().slice(0,10);
@@ -59,7 +59,7 @@ function resolutionHtml(t){
   }).join("");
 }
 function gptHelpHtml(t){
-  if(!t.gpt_can_help)return "";
+  if(t.category==="paid_account"||!t.gpt_can_help)return "";
   const prepared=!!(t.gpt_help_prompt||"").trim();
   return `<div class="gpt-help"><strong>GPT can probably help complete this task.</strong><div class="helper">${esc(t.gpt_help_reason||"This request can be prepared or solved with GPT assistance.")}</div><div class="helper">${prepared?"Prompt already prepared.":"Full prompt is generated only when you click Prepare GPT Prompt."}</div><div class="row"><button class="button primary" data-show-gpt-prompt="${t.id}">${prepared?"View GPT Prompt":"Prepare GPT Prompt"}</button><button class="button secondary" data-suppress-gpt-help="${t.id}">Don't Suggest GPT Help for This Type</button></div></div>`;
 }
@@ -74,6 +74,16 @@ function paymentFields(t){
   </div>`;
 }
 function actionButtons(t,history=false){
+  if(t.category==="paid_account"&&!history){
+    return `<div class="actions">
+      <button class="task-action" data-status="${t.id}">Status</button>
+      <button class="task-action" data-note="${t.id}">Create Note</button>
+      <button class="task-action" data-deadline="${t.id}">Add Deadline</button>
+      <button class="task-action" data-email-research="${t.id}">Ask Email</button>
+      ${t.email_url?`<a class="task-action" href="${esc(t.email_url)}" target="_blank" rel="noopener">See Email</a>`:""}
+      <button class="task-action" data-reply="${t.id}">Prepare Reply</button>
+    </div>`;
+  }
   if(t.completed&&t.category==="payment"&&!history)return `<div class="actions">${t.email_url?`<a class="task-action" href="${esc(t.email_url)}" target="_blank" rel="noopener">See Invoice Email</a>`:""}<span class="paid-status">Paid ✓ ${esc(safeDate(t.paid_at||t.completed_at))}</span></div>`;
   if(history)return `<div class="actions"><button class="task-action" data-restore="${t.id}">Restore</button><button class="task-action danger" data-delete="${t.id}">Delete</button></div>`;
   const invoiceBtn=t.category==="payment"?`<button class="task-action invoice-button ${t.invoice_sent?"active":""}" data-invoice-toggle="${t.id}">${t.invoice_sent?"Invoice Sent ✓":"Mark Invoice Sent"}</button>`:"";
@@ -100,13 +110,108 @@ function taskCard(t,history=false){
   const participants=participantText(t);
   return `<article class="task" id="task-${t.id}">
     <div class="task-head"><div><h3>${esc(t.title)}</h3><div class="task-received">Received: ${esc(receivedLabel(t)||"Unknown")}</div><div class="party">${esc(t.party)}</div>${assignee}${participants?`<div class="participant-line">Participants: ${esc(participants)}</div>`:""}</div>
-      <div class="bubbles"><span class="bubble ${t.category==="payment"?"payment":"client"}">${t.category==="payment"?"PAYMENT":"CLIENT TASK"}</span>${t.invoice_sent?`<span class="bubble invoice">INVOICE SENT</span>`:""}${multi}<span class="bubble ${esc(t.priority)}">${esc((t.priority||"normal").toUpperCase())}</span>${dueBubble(t)}<span class="bubble status-${esc(t.status)}">${esc(t.status)}</span></div></div>
+      <div class="bubbles"><span class="bubble ${t.category==="payment"?"payment":t.category==="paid_account"?"paid-account":"client"}">${t.category==="payment"?"PAYMENT":t.category==="paid_account"?"PAID ACCOUNT":"CLIENT TASK"}</span>${t.invoice_sent?`<span class="bubble invoice">INVOICE SENT</span>`:""}${multi}<span class="bubble ${esc(t.priority)}">${esc((t.priority||"normal").toUpperCase())}</span>${dueBubble(t)}<span class="bubble status-${esc(t.status)}">${esc(t.status)}</span></div></div>
     <div class="detail">${esc(t.detail||"")}</div>
     ${paymentFields(t)}${resolutionHtml(t)}${gptHelpHtml(t)}${notesHtml(t)}${emailUpdatesHtml(t)}${chatUpdatesHtml(t)}${researchLogsHtml(t)}
     <div id="reveal-${t.id}"></div>${actionButtons(t,history)}
   </article>`;
 }
-function getTask(id){return [...state.client,...state.payment,...state.history].find(t=>t.id===Number(id))}
+function getTask(id){return [...state.client,...state.payment,...state.invoice,...state.paidAccounts,...state.history].find(t=>t.id===Number(id))}
+
+function normalizeTaskDomain(t){
+  const raw=String(t.sender_domain||"").trim().toLowerCase();
+  if(raw)return raw.replace(/^www\./,"");
+  const email=String(t.sender_email||t.email_to||"").trim().toLowerCase();
+  const at=email.lastIndexOf("@");
+  return at>=0?email.slice(at+1).replace(/^www\./,""):"";
+}
+
+function domainDisplayName(domain){
+  const root=String(domain||"").split(".")[0]||"";
+  return root.replace(/[-_]+/g," ").replace(/\b\w/g,c=>c.toUpperCase())||"Organization";
+}
+
+function organizationNameForDomain(tasks,domain){
+  const counts={};
+  for(const t of tasks){
+    const name=String(t.party||"").trim();
+    if(!name)continue;
+    counts[name]=(counts[name]||0)+1;
+  }
+  const ranked=Object.entries(counts).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
+  // Use the most common organization/client designation already attached to the tasks.
+  // If tasks have different sender names, the domain remains the stable group designation.
+  if(ranked.length && ranked[0][1]>1)return ranked[0][0];
+  return domainDisplayName(domain);
+}
+
+function groupClientTasksByDomain(rows){
+  const domains=new Map();
+  const standalone=[];
+
+  for(const t of rows){
+    const domain=normalizeTaskDomain(t);
+    if(!domain){
+      standalone.push({type:"task",task:t});
+      continue;
+    }
+    if(!domains.has(domain))domains.set(domain,[]);
+    domains.get(domain).push(t);
+  }
+
+  const groups=[];
+  for(const [domain,tasks] of domains.entries()){
+    if(tasks.length<2){
+      standalone.push({type:"task",task:tasks[0]});
+      continue;
+    }
+    groups.push({
+      type:"group",
+      domain,
+      organization:organizationNameForDomain(tasks,domain),
+      tasks
+    });
+  }
+
+  // Keep organization groups together; group heading makes domain explicit.
+  groups.sort((a,b)=>a.organization.localeCompare(b.organization)||a.domain.localeCompare(b.domain));
+  return [...groups,...standalone];
+}
+
+function organizationGroupHtml(group){
+  const expanded=state.orgExpanded[group.domain]!==false;
+  const urgent=group.tasks.filter(t=>t.priority==="urgent").length;
+  const waiting=group.tasks.filter(t=>t.status==="Waiting").length;
+  const due=group.tasks.filter(t=>t.due_date&&t.due_date<=TODAY&&!t.completed).length;
+
+  return `<section class="organization-group">
+    <button class="organization-head" data-org-toggle="${esc(group.domain)}">
+      <div class="organization-title-wrap">
+        <span class="organization-chevron">${expanded?"▾":"▸"}</span>
+        <div>
+          <div class="organization-kicker">ORGANIZATION</div>
+          <div class="organization-title">${esc(group.organization)}</div>
+          <div class="organization-domain">${esc(group.domain)}</div>
+        </div>
+      </div>
+      <div class="organization-badges">
+        <span class="org-count">${group.tasks.length} tasks</span>
+        ${urgent?`<span class="org-mini urgent">${urgent} urgent</span>`:""}
+        ${due?`<span class="org-mini due">${due} due</span>`:""}
+        ${waiting?`<span class="org-mini waiting">${waiting} waiting</span>`:""}
+      </div>
+    </button>
+    <div class="organization-tasks ${expanded?"":"hidden"}">
+      ${group.tasks.map(t=>taskCard(t,false)).join("")}
+    </div>
+  </section>`;
+}
+
+function groupedClientHtml(rows){
+  const units=groupClientTasksByDomain(rows);
+  return units.map(x=>x.type==="group"?organizationGroupHtml(x):taskCard(x.task,false)).join("");
+}
+
 function sortTasks(rows){
   const mode=state.sortBy||"due";
   const received=t=>String(t.source_received_at||t.created_at||"");
@@ -143,6 +248,7 @@ function applyQuickFilter(rows){
   const qf=state.quickFilter;if(!qf||qf.endsWith("-all"))return rows;
   if(qf==="client-urgent")return rows.filter(t=>t.priority==="urgent");
   if(qf==="client-due")return rows.filter(t=>t.due_date&&t.due_date<=TODAY);
+  if(qf==="client-working")return rows.filter(t=>t.status==="Working");
   if(qf==="client-waiting")return rows.filter(t=>t.status==="Waiting");
   if(qf==="payment-known")return rows.filter(t=>Number(t.amount||0)>0);
   if(qf==="payment-overdue")return rows.filter(t=>t.due_date&&t.due_date<TODAY);
@@ -153,17 +259,24 @@ function applyQuickFilter(rows){
   return rows;
 }
 function filtered(rows){
-  const q=el("search").value.toLowerCase().trim(),st=el("statusFilter").value;rows=applyQuickFilter(rows);
+  const q=el("search").value.toLowerCase().trim(),st=el("statusFilter").value;
+  // The default Client Tasks feed is the true active inbox. Working and Waiting
+  // are moved into their scorecard feeds instead of staying in the main list.
+  if(state.tab==="client"&&(!state.quickFilter||state.quickFilter==="client-all")&&st==="all"){
+    rows=rows.filter(t=>!["Working","Waiting"].includes(t.status));
+  }else{
+    rows=applyQuickFilter(rows);
+  }
   return sortTasks(rows.filter(t=>{
     const hay=`${t.party} ${t.title} ${t.detail} ${t.assignee||""} ${participantText(t)} ${(t.notes||[]).map(n=>n.body).join(" ")} ${(t.research_logs||[]).map(r=>r.question+" "+r.answer).join(" ")}`.toLowerCase();
     return(!q||hay.includes(q))&&(st==="all"||t.status===st);
   }));
 }
 function renderMetrics(){
-  const c=state.counts||{};el("tabClientCount").textContent=c.client??state.client.length;el("tabPaymentCount").textContent=c.payment??state.payment.length;el("tabInvoiceCount").textContent=c.invoice??state.invoice.length;el("tabSentCount").textContent=c.sent??state.sentFollowups.length;el("tabGmailCount").textContent=c.gmail??state.gmailSuggestions.length;el("tabChatCount").textContent=c.chat??state.chatSuggestions.length;el("tabMeetingCount").textContent=c.meetings??state.meetingReviews.length;el("tabCompletedCount").textContent=c.completed??state.history.length;
-  el("clientCount").textContent=state.client.length;el("clientUrgent").textContent=state.client.filter(t=>t.priority==="urgent").length;el("clientDue").textContent=state.client.filter(t=>t.due_date&&t.due_date<=TODAY).length;el("clientWaiting").textContent=state.client.filter(t=>t.status==="Waiting").length;
+  const c=state.counts||{};el("tabClientCount").textContent=c.client??state.client.length;el("tabPaymentCount").textContent=c.payment??state.payment.length;el("tabPaidAccountsCount").textContent=c.paid_accounts??state.paidAccounts.filter(x=>x.paid_account_state==="current").length;el("tabInvoiceCount").textContent=c.invoice??state.invoice.length;el("tabSentCount").textContent=c.sent??state.sentFollowups.length;el("tabGmailCount").textContent=c.gmail??state.gmailSuggestions.length;el("tabChatCount").textContent=c.chat??state.chatSuggestions.length;el("tabMeetingCount").textContent=c.meetings??state.meetingReviews.length;el("tabCompletedCount").textContent=c.completed??state.history.length;
+  el("clientCount").textContent=state.client.filter(t=>!["Working","Waiting"].includes(t.status)).length;el("clientUrgent").textContent=state.client.filter(t=>t.priority==="urgent").length;el("clientDue").textContent=state.client.filter(t=>t.due_date&&t.due_date<=TODAY).length;el("clientWorking").textContent=state.client.filter(t=>t.status==="Working").length;el("clientWaiting").textContent=state.client.filter(t=>t.status==="Waiting").length;
   const s=state.summary||{};el("payCount").textContent=s.count_all||0;el("payTotal").textContent=money(s.total_known||0);el("payOverdue").textContent=s.overdue_count||0;el("payOverdueTotal").textContent=money(s.overdue_total||0);
-  el("invoiceCount").textContent=s.invoice_register_count||state.invoice.length;el("invoiceTotal").textContent=s.invoice_unpaid_count||state.invoice.filter(t=>!t.completed).length;el("invoiceOverdue").textContent=state.invoice.filter(t=>!t.completed&&t.due_date&&t.due_date<TODAY).length;el("invoiceNoAmount").textContent=s.invoice_paid_count||state.invoice.filter(t=>t.completed).length;
+
   el("sentCount").textContent=state.sentFollowups.length;el("sentDue").textContent=state.sentFollowups.filter(x=>x.followup_due&&x.followup_due<=TODAY).length;el("sentLinked").textContent=state.sentFollowups.filter(x=>Number(x.task_id||0)>0).length;el("sentMulti").textContent=state.sentFollowups.filter(x=>Number(x.recipient_count||0)>1||(x.recipients||"").split(",").filter(Boolean).length>1).length;
   document.querySelectorAll(".metric[data-quick]").forEach(m=>m.classList.toggle("active-filter",m.dataset.quick===state.quickFilter));
   document.querySelectorAll(".metric[data-sent-quick]").forEach(m=>m.classList.toggle("active-filter",m.dataset.sentQuick===state.sentQuick));
@@ -171,8 +284,145 @@ function renderMetrics(){
 }
 function renderTasks(){
   renderMetrics();let rows=[];if(state.tab==="client")rows=state.client;if(state.tab==="payment")rows=state.payment;if(state.tab==="invoice")rows=state.invoice;if(state.tab==="completed")rows=state.history;
-  const history=state.tab==="completed";el("taskList").innerHTML=filtered(rows).map(t=>taskCard(t,history)).join("")||`<div class="panel">No matching items.</div>`;
+  const history=state.tab==="completed";
+  const visible=filtered(rows);
+  if(state.tab==="client"){
+    el("taskList").innerHTML=groupedClientHtml(visible)||`<div class="panel">No matching items.</div>`;
+  }else{
+    el("taskList").innerHTML=visible.map(t=>taskCard(t,history)).join("")||`<div class="panel">No matching items.</div>`;
+  }
 }
+
+function dateOnly(v){
+  if(!v)return "—";
+  try{return new Date(v).toLocaleDateString()}catch(_){return v}
+}
+function daysOverdue(due){
+  if(!due)return 0;
+  const d=new Date(`${due}T00:00:00`);
+  const t=new Date(`${TODAY}T00:00:00`);
+  return Math.max(0,Math.floor((t-d)/86400000));
+}
+function invoiceAgeBucket(t){
+  const n=daysOverdue(t.due_date);
+  if(n>=90)return "90";
+  if(n>=60)return "60";
+  if(n>=30)return "30";
+  return "current";
+}
+function iconButton(symbol,title,attr,id,kind=""){
+  return `<button class="table-icon ${kind}" title="${esc(title)}" aria-label="${esc(title)}" ${attr}="${id}">${symbol}</button>`;
+}
+function invoiceActionIcons(t){
+  return `<span class="table-actions">
+    ${iconButton("✓","Mark Paid","data-invoice-paid",t.id,"positive")}
+    ${iconButton("✎","See / Edit","data-record-edit",t.id)}
+    ${iconButton("×","Delete","data-invoice-delete",t.id,"danger")}
+  </span>`;
+}
+function paidAccountActionIcons(t){
+  return `<span class="table-actions">
+    ${iconButton("✎","See / Edit","data-record-edit",t.id)}
+    ${iconButton("✓","Reconciled","data-account-reconciled",t.id,"positive")}
+    ${iconButton("×","Delete","data-account-delete",t.id,"danger")}
+  </span>`;
+}
+function renderPaidAccounts(){
+  const q=(el("paidAccountsSearch")?.value||"").toLowerCase().trim();
+  const current=state.paidAccounts.filter(t=>(t.paid_account_state||"current")==="current"&&!t.completed)
+    .filter(t=>!q||`${t.party} ${t.invoice_number}`.toLowerCase().includes(q));
+  const history=state.paidAccounts.filter(t=>["reconciled","deleted"].includes(t.paid_account_state||""));
+
+  el("paidAccountsCurrentBody").innerHTML=current.length?current.map(t=>`<tr>
+    <td>${esc(dateOnly(t.source_received_at))}</td>
+    <td><strong>${esc(t.party||"—")}</strong></td>
+    <td><div class="invoice-action-cell"><strong>${esc(t.invoice_number||"—")}</strong>${paidAccountActionIcons(t)}</div></td>
+    <td class="money-col">${money(t.amount,t.currency)}</td>
+  </tr>`).join(""):`<tr><td colspan="4" class="empty-cell">No payments waiting to reconcile.</td></tr>`;
+
+  el("paidAccountsHistoryBody").innerHTML=history.length?history.sort((a,b)=>String(b.paid_account_action_at||"").localeCompare(String(a.paid_account_action_at||""))).map(t=>`<tr>
+    <td>${esc(dateOnly(t.paid_account_action_at||t.completed_at))}</td>
+    <td><span class="history-state ${esc(t.paid_account_state)}">${esc((t.paid_account_state||"").toUpperCase())}</span></td>
+    <td>${esc(dateOnly(t.source_received_at))}</td>
+    <td>${esc(t.party||"—")}</td>
+    <td>${esc(t.invoice_number||"—")}</td>
+    <td class="money-col">${money(t.amount,t.currency)}</td>
+  </tr>`).join(""):`<tr><td colspan="6" class="empty-cell">No reconciliation history yet.</td></tr>`;
+}
+function renderInvoices(){
+  const q=(el("invoiceSearch")?.value||"").toLowerCase().trim();
+  let current=state.invoice.filter(t=>(t.invoice_state||"current")==="current"&&!t.completed)
+    .filter(t=>!q||`${t.party} ${t.invoice_number}`.toLowerCase().includes(q));
+  if(state.invoiceAge!=="all")current=current.filter(t=>invoiceAgeBucket(t)===state.invoiceAge);
+
+  const sums={current:0,"30":0,"60":0,"90":0};
+  for(const t of state.invoice.filter(t=>(t.invoice_state||"current")==="current"&&!t.completed)){
+    sums[invoiceAgeBucket(t)]+=Number(t.amount||0);
+  }
+  el("invoiceAgeCurrent").textContent=money(sums.current);
+  el("invoiceAge30").textContent=money(sums["30"]);
+  el("invoiceAge60").textContent=money(sums["60"]);
+  el("invoiceAge90").textContent=money(sums["90"]);
+  document.querySelectorAll("[data-invoice-age]").forEach(x=>x.classList.toggle("active-filter",x.dataset.invoiceAge===state.invoiceAge));
+  el("clearInvoiceAge").classList.toggle("hidden",state.invoiceAge==="all");
+
+  el("invoiceCurrentBody").innerHTML=current.length?current.map(t=>`<tr>
+    <td>${esc(dateOnly(t.source_received_at))}</td>
+    <td><strong>${esc(t.party||"—")}</strong></td>
+    <td><div class="invoice-action-cell"><strong>${esc(t.invoice_number||"—")}</strong>${invoiceActionIcons(t)}</div></td>
+    <td>${esc(t.due_date||"—")}</td>
+    <td class="money-col"><strong>${money(t.amount,t.currency)}</strong>${Number(t.amount_paid||0)>0?`<small>${money(t.amount_paid,t.currency)} paid</small>`:""}</td>
+  </tr>`).join(""):`<tr><td colspan="5" class="empty-cell">No invoices in this view.</td></tr>`;
+
+  const history=state.invoice.filter(t=>["paid","deleted"].includes(t.invoice_state||""));
+  el("invoiceHistoryBody").innerHTML=history.length?history.sort((a,b)=>String(b.invoice_action_at||b.completed_at||"").localeCompare(String(a.invoice_action_at||a.completed_at||""))).map(t=>`<tr>
+    <td>${esc(dateOnly(t.invoice_action_at||t.completed_at))}</td>
+    <td><span class="history-state ${esc(t.invoice_state)}">${esc((t.invoice_state||"").toUpperCase())}</span></td>
+    <td>${esc(t.party||"—")}</td>
+    <td>${esc(t.invoice_number||"—")}</td>
+    <td>${esc(t.due_date||"—")}</td>
+    <td class="money-col">${money(t.original_amount||t.amount,t.currency)}</td>
+    <td class="money-col">${money(t.amount_paid||t.paid_amount,t.currency)}</td>
+  </tr>`).join(""):`<tr><td colspan="7" class="empty-cell">No paid or deleted invoice history yet.</td></tr>`;
+}
+async function openRecordDetail(id){
+  const t=await api(`/api/tasks/${id}`);
+  el("recordDetailTitle").textContent=t.category==="paid_account"?"Paid Account Details":"Invoice Details";
+  const paymentEvents=(t.invoice_payment_events||[]).map(x=>`<div class="note"><strong>${esc((x.event_type||"").toUpperCase())} · ${money(x.amount,t.currency)}</strong><div>${esc(x.note||"")}</div><small>${esc(safeDate(x.created_at))}${x.reference?` · ${esc(x.reference)}`:""}</small></div>`).join("");
+  const source=t.email_url?`<a class="button secondary" href="${esc(t.email_url)}" target="_blank" rel="noopener">See Source Email</a>`:"";
+  const partial=t.category==="payment"&&(t.invoice_state||"current")==="current"&&!t.completed?`<div class="detail-section"><h3>Partial Payment</h3><div class="formgrid"><label>Amount<input id="recordPartialAmount" type="number" min="0.01" step="0.01" max="${Number(t.amount||0)}"></label><label>Reference<input id="recordPartialReference"></label><label class="span2">Note<textarea id="recordPartialNote" rows="2"></textarea></label></div><button class="button primary" data-record-partial="${t.id}">Record Partial Payment</button></div>`:"";
+  el("recordDetailBody").innerHTML=`<div class="record-detail-summary">
+    <div><span>Organization / Vendor</span><strong>${esc(t.party||"—")}</strong></div>
+    <div><span>Received</span><strong>${esc(safeDate(t.source_received_at||t.created_at))}</strong></div>
+    <div><span>Invoice #</span><strong>${esc(t.invoice_number||"—")}</strong></div>
+    <div><span>Remaining Amount</span><strong>${money(t.amount,t.currency)}</strong></div>
+    ${t.category==="payment"?`<div><span>Original Amount</span><strong>${money(t.original_amount||t.amount,t.currency)}</strong></div><div><span>Paid So Far</span><strong>${money(t.amount_paid||0,t.currency)}</strong></div><div><span>Due Date</span><strong>${esc(t.due_date||"—")}</strong></div>`:""}
+  </div>
+  <div class="detail-section"><h3>Details</h3><p>${esc(t.detail||"")}</p>${source}</div>
+  ${partial}
+  ${paymentEvents?`<div class="detail-section"><h3>Payment History</h3>${paymentEvents}</div>`:""}
+  ${notesHtml(t)}${emailUpdatesHtml(t)}${chatUpdatesHtml(t)}${researchLogsHtml(t)}
+  <div class="detail-section"><h3>Actions</h3>
+    <div class="row">
+      <button class="button secondary" data-record-reply="${t.id}">Prepare Reply</button>
+      <button class="button secondary" data-record-resolution="${t.id}">Check Resolution</button>
+    </div>
+    <label>Create Note<textarea id="recordNoteText" rows="2" placeholder="Add an update or reconciliation note..."></textarea></label>
+    <button class="button secondary" data-record-note="${t.id}">Save Note</button>
+    <label>Ask Email<textarea id="recordResearchText" rows="2" placeholder="Ask a question about the source email or chain..."></textarea></label>
+    <button class="button secondary" data-record-research="${t.id}">Search Email</button>
+    <div id="recordActionStatus" class="helper"></div>
+  </div>
+  <div class="detail-section"><h3>Edit</h3><div class="formgrid">
+    <label>Organization / Vendor<input id="recordParty" value="${esc(t.party||"")}"></label>
+    <label>Invoice #<input id="recordInvoice" value="${esc(t.invoice_number||"")}"></label>
+    <label>Remaining Amount<input id="recordAmount" type="number" min="0" step="0.01" value="${Number(t.amount||0)}"></label>
+    <label>Due Date<input id="recordDue" type="date" value="${esc(t.due_date||"")}"></label>
+    <label class="span2">Details<textarea id="recordDetailText" rows="4">${esc(t.detail||"")}</textarea></label>
+  </div><div class="row"><button class="button primary" data-record-save="${t.id}">Save Changes</button>${source}</div></div>`;
+  el("recordDetailDialog").showModal();
+}
+
 function gmailSuggestionCard(s){
   const payment=s.suggested_category==="payment",multi=Number(s.recipient_count||0)>1;
   return `<article class="suggestion"><div class="task-head"><div><h3>${esc(s.suggested_title||s.subject||"Gmail action")}</h3><div class="party">${esc(s.sender_name||s.sender_email)}${s.sender_email?` · ${esc(s.sender_email)}`:""}</div></div><div class="bubbles"><span class="bubble ${payment?"payment":"client"}">${payment?"PAYMENT":"CLIENT TASK"}</span>${multi?`<span class="bubble multi">MULTI-PERSON · ${s.recipient_count}</span>`:""}${s.invoice_sent?`<span class="bubble invoice">INVOICE SENT</span>`:""}${s.gpt_can_help?`<span class="bubble gpt">GPT CAN HELP</span>`:""}<span class="bubble ${esc(s.suggested_priority)}">${esc((s.suggested_priority||"normal").toUpperCase())}</span>${s.suggested_due_date?`<span class="bubble future">Due ${esc(s.suggested_due_date)}</span>`:`<span class="bubble no-due">No deadline</span>`}</div></div><div class="ai-summary">${esc(s.suggested_summary||s.snippet||"")}</div>${payment?`<div class="payment-box"><div class="payment-field"><span>Amount</span><strong>${money(s.payment_amount,s.currency)}</strong></div><div class="payment-field"><span>Invoice #</span><strong>${esc(s.invoice_number||"—")}</strong></div><div class="payment-field"><span>Invoice Sent</span><strong>${s.invoice_sent?"Yes":"No"}</strong></div></div>`:""}${s.gpt_can_help?`<div class="helper">GPT help: ${esc(s.gpt_help_reason||"")}</div>`:""}<div class="suggestion-meta"><span class="confidence">${esc((s.confidence||"").toUpperCase())} confidence</span> · ${esc(s.reason||"")} · Analyzer: ${esc(s.analyzer||"")}</div><div class="row"><button class="button primary" data-approve="${s.id}">Approve</button><a class="button secondary" href="${esc(s.email_url)}" target="_blank" rel="noopener">See Email</a>${s.gpt_can_help?`<button class="button secondary" data-suppress-gpt-suggestion="${s.id}">Don't Suggest GPT Help for This Type</button>`:""}<button class="button not-task-button" data-not-task="${s.id}">Not a Task — Train</button><button class="button secondary" data-dismiss="${s.id}">Dismiss</button></div></article>`;
@@ -180,16 +430,43 @@ function gmailSuggestionCard(s){
 function renderGmailSuggestions(){el("suggestionList").innerHTML=state.gmailSuggestions.length?state.gmailSuggestions.map(gmailSuggestionCard).join(""):`<div class="panel">No new Gmail items waiting for review.</div>`}
 function chatSuggestionCard(s){
   const payment=s.suggested_category==="payment";
-  return `<article class="suggestion"><div class="task-head"><div><h3>${esc(s.suggested_title||"Google Chat task")}</h3><div class="party">${esc(s.space_display_name||"Google Chat")} · ${esc(s.sender_display_name||"")}</div></div><div class="bubbles"><span class="bubble ${payment?"payment":"client"}">${payment?"PAYMENT":"CHAT TASK"}</span>${s.gpt_can_help?`<span class="bubble gpt">GPT CAN HELP</span>`:""}<span class="bubble ${esc(s.suggested_priority)}">${esc((s.suggested_priority||"normal").toUpperCase())}</span>${s.suggested_due_date?`<span class="bubble future">Due ${esc(s.suggested_due_date)}</span>`:""}</div></div><div class="ai-summary">${esc(s.suggested_summary||s.message_text||"")}</div><div class="suggestion-meta">${esc((s.confidence||"").toUpperCase())} confidence · ${esc(s.reason||"")}</div><div class="row"><button class="button primary" data-chat-approve="${s.id}">Approve</button>${s.space_uri?`<a class="button secondary" href="${esc(s.space_uri)}" target="_blank" rel="noopener">Open Chat</a>`:""}<button class="button not-task-button" data-chat-not-task="${s.id}">Not a Task — Train</button><button class="button secondary" data-chat-dismiss="${s.id}">Dismiss</button></div></article>`;
+  return `<article class="suggestion ${s.snoozed?"snoozed":""}">
+    <div class="task-head"><div><h3>${esc(s.suggested_title||"Google Chat task")}</h3><div class="party">${esc(s.space_display_name||"Google Chat")} · ${esc(s.sender_display_name||"")} · ${esc(safeDate(s.create_time))}</div></div>
+      <div class="bubbles"><span class="bubble ${payment?"payment":"client"}">${payment?"PAYMENT":"CHAT TASK"}</span>${s.snoozed?`<span class="bubble waiting">SNOOZED</span>`:""}<span class="bubble ${esc(s.suggested_priority)}">${esc((s.suggested_priority||"normal").toUpperCase())}</span></div></div>
+    <div class="ai-summary">${esc(s.suggested_summary||s.message_text||"")}</div>
+    <div class="row">
+      <button class="button primary" data-chat-approve="${s.id}">Make Task</button>
+      <button class="button secondary" data-chat-invoice="${s.id}">Send to Invoices</button>
+      <button class="button secondary" data-chat-snooze="${s.id}">Snooze</button>
+      <button class="button secondary" data-chat-dismiss-chain="${s.id}">Dismiss Rest of Chat Chain</button>
+      <button class="button secondary" data-chat-dismiss="${s.id}">Dismiss</button>
+      ${s.space_uri?`<a class="button secondary" href="${esc(s.space_uri)}" target="_blank" rel="noopener">Open Chat</a>`:""}
+    </div>
+  </article>`;
 }
-function renderChatSuggestions(){el("chatSuggestionList").innerHTML=state.chatSuggestions.length?state.chatSuggestions.map(chatSuggestionCard).join(""):`<div class="panel">No new Google Chat items waiting for review.</div>`}
-function sentRecipientCount(s){return Number(s.recipient_count||0)||((s.recipients||"").split(",").filter(x=>x.trim()).length)}
-function sentCard(s){
-  const count=sentRecipientCount(s),due=s.followup_due&&s.followup_due<=TODAY;
-  return `<article class="task"><div class="task-head"><div><h3>${esc(s.subject||"Sent follow-up")}</h3><div class="party">${esc(s.party||s.recipients||"Sent email")}</div></div><div class="bubbles"><span class="bubble waiting">WAITING ON REPLY</span>${count>1?`<span class="bubble multi">MULTI-RECIPIENT · ${count}</span>`:""}<span class="bubble ${esc(s.priority||"high")}">${esc((s.priority||"high").toUpperCase())}</span>${s.followup_due?`<span class="bubble ${due?"overdue":"future"}">${due?"FOLLOW UP · ":"Follow up "}${esc(s.followup_due)}</span>`:""}${s.task_id?`<span class="bubble client">LINKED TASK</span>`:""}</div></div><div class="detail">${esc(s.summary||s.reason||"")}</div><div class="participant-line">Recipients: ${esc(s.recipients||"Not available")}</div><div class="helper">${esc(s.reason||"")}</div><div class="actions">${s.email_url?`<a class="task-action" href="${esc(s.email_url)}" target="_blank" rel="noopener">See Sent Email</a>`:""}${s.task_id?`<button class="task-action" data-open-linked-task="${s.task_id}">Open Linked Task</button>`:`<button class="task-action complete" data-sent-create-task="${s.id}">Create Task</button>`}<button class="task-action" data-sent-dismiss="${s.id}">Dismiss Follow-up</button></div></article>`;
+function chatGroupLabel(s){
+  const space=String(s.space_display_name||"").trim();
+  const low=space.toLowerCase();
+  const generic=!space||["google chat","general","direct message","dm","chat"].includes(low)||low.includes("team");
+  const title=String(s.suggested_title||"").trim();
+  return generic?(title||String(s.sender_display_name||"Google Chat")):space;
+}
+function renderChatSuggestions(){
+  const rows=[...state.chatSuggestions].sort((a,b)=>{
+    const snooze=(Number(a.snoozed||0)-Number(b.snoozed||0));
+    return snooze!==0?snooze:String(b.create_time||"").localeCompare(String(a.create_time||""));
+  });
+  const groups=new Map();
+  for(const s of rows){
+    const label=chatGroupLabel(s);
+    if(!groups.has(label))groups.set(label,[]);
+    groups.get(label).push(s);
+  }
+  const ordered=[...groups.entries()].sort((a,b)=>String(b[1][0]?.create_time||"").localeCompare(String(a[1][0]?.create_time||"")));
+  el("chatSuggestionList").innerHTML=ordered.length?ordered.map(([label,items])=>`<section class="chat-topic-group"><div class="chat-topic-head"><strong>${esc(label)}</strong><span>${items.length} item${items.length===1?"":"s"} · newest first</span></div>${items.map(chatSuggestionCard).join("")}</section>`).join(""):`<div class="panel">No new Google Chat items waiting for review.</div>`;
 }
 function renderSent(){
-  renderMetrics();let rows=[...state.sentFollowups];
+  renderMetrics();let rows=[...state.sentFollowups].sort((a,b)=>String(b.sent_at||"").localeCompare(String(a.sent_at||"")));
   if(state.sentQuick==="due")rows=rows.filter(x=>x.followup_due&&x.followup_due<=TODAY);
   if(state.sentQuick==="linked")rows=rows.filter(x=>Number(x.task_id||0)>0);
   if(state.sentQuick==="multi")rows=rows.filter(x=>sentRecipientCount(x)>1);
@@ -201,10 +478,10 @@ function meetingCard(m){
 }
 function renderMeetings(){el("meetingList").innerHTML=state.meetingReviews.length?state.meetingReviews.map(meetingCard).join(""):`<div class="panel">No Gemini meeting recaps waiting for review.</div>`}
 function updateViews(){
-  ["client","payment","invoice","sent","gmail","chat","meetings","completed"].forEach(name=>el(`${name}View`).classList.toggle("hidden",state.tab!==name));
-  const taskTab=["client","payment","invoice","completed"].includes(state.tab);el("taskControls").classList.toggle("hidden",!taskTab);el("taskList").classList.toggle("hidden",!taskTab);
+  ["client","payment","paidaccounts","invoice","sent","gmail","chat","meetings","completed"].forEach(name=>el(`${name}View`).classList.toggle("hidden",state.tab!==name));
+  const taskTab=["client","payment","completed"].includes(state.tab);el("taskControls").classList.toggle("hidden",!taskTab);el("taskList").classList.toggle("hidden",!taskTab);
   document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("active",b.dataset.tab===state.tab));
-  if(taskTab)renderTasks();if(state.tab==="sent")renderSent();if(state.tab==="gmail")renderGmailSuggestions();if(state.tab==="chat")renderChatSuggestions();if(state.tab==="meetings")renderMeetings();
+  if(taskTab)renderTasks();if(state.tab==="invoice")renderInvoices();if(state.tab==="paidaccounts")renderPaidAccounts();if(state.tab==="sent")renderSent();if(state.tab==="gmail")renderGmailSuggestions();if(state.tab==="chat")renderChatSuggestions();if(state.tab==="meetings")renderMeetings();
 }
 async function loadSystem(){
   state.system=await api("/api/system/status");const s=state.system;
@@ -277,6 +554,7 @@ function clearInactiveTabData(active){
   if(active!=="client")state.client=[];
   if(active!=="payment")state.payment=[];
   if(active!=="invoice")state.invoice=[];
+  if(active!=="paidaccounts")state.paidAccounts=[];
   if(active!=="completed")state.history=[];
   if(active!=="gmail")state.gmailSuggestions=[];
   if(active!=="chat")state.chatSuggestions=[];
@@ -288,7 +566,8 @@ async function loadTabData(tab){
   clearInactiveTabData(tab);
   if(tab==="client")state.client=await api("/api/tasks?category=client");
   if(tab==="payment"){state.summary=await api("/api/payment-summary");state.payment=await api("/api/tasks?category=payment")}
-  if(tab==="invoice"){state.summary=await api("/api/payment-summary");state.invoice=await api("/api/invoices")}
+  if(tab==="invoice")state.invoice=await api("/api/invoices");
+  if(tab==="paidaccounts")state.paidAccounts=await api("/api/paid-accounts");
   if(tab==="completed")state.history=await api("/api/tasks?completed=1");
   if(tab==="gmail")state.gmailSuggestions=await api("/api/gmail/suggestions");
   if(tab==="chat")state.chatSuggestions=await api("/api/chat/suggestions");
@@ -315,6 +594,14 @@ document.addEventListener("click",e=>{const m=e.target.closest(".metric[data-sen
 el("clearQuickFilter").addEventListener("click",()=>{state.quickFilter="";renderTasks()});
 
 // Task actions.
+el("taskList").addEventListener("click",e=>{
+  const toggle=e.target.closest("[data-org-toggle]");
+  if(!toggle)return;
+  const domain=toggle.dataset.orgToggle;
+  state.orgExpanded[domain]=state.orgExpanded[domain]===false?true:false;
+  renderTasks();
+});
+
 el("taskList").addEventListener("click",async e=>{
   const b=e.target.closest("[data-status],[data-note],[data-deadline],[data-email-research],[data-check-resolution],[data-gpt-help],[data-show-gpt-prompt],[data-suppress-gpt-help],[data-payment-edit],[data-invoice-toggle],[data-reply],[data-chat-reply],[data-live-not-task],[data-mark-paid],[data-complete],[data-restore],[data-delete],[data-resolution-yes],[data-resolution-no]");if(!b)return;
   const key=Object.keys(b.dataset)[0],id=Number(b.dataset[key]),t=getTask(id);if(!t)return;
@@ -393,11 +680,87 @@ el("taskList").addEventListener("click",async e=>{
 // Gmail review.
 el("suggestionList").addEventListener("click",async e=>{const approve=e.target.closest("[data-approve]"),suppress=e.target.closest("[data-suppress-gpt-suggestion]"),train=e.target.closest("[data-not-task]"),dismiss=e.target.closest("[data-dismiss]");if(approve){await api(`/api/gmail/suggestions/${approve.dataset.approve}/approve`,{method:"POST",body:"{}"});await load()}if(suppress){if(confirm("Stop suggesting GPT help for future emails of this same type?")){await api(`/api/gmail/suggestions/${suppress.dataset.suppressGptSuggestion}/gpt-help/suppress`,{method:"POST"});await load()}}if(train){train.disabled=true;train.textContent="Training…";try{await api(`/api/gmail/suggestions/${train.dataset.notTask}/not-task`,{method:"POST",body:JSON.stringify({reason:"Marked Not a Task from Gmail Review"})});await load()}catch(err){alert(err.message);train.disabled=false;train.textContent="Not a Task — Train"}}if(dismiss){await api(`/api/gmail/suggestions/${dismiss.dataset.dismiss}/dismiss`,{method:"POST"});await load()}});
 // Chat review.
-el("chatSuggestionList").addEventListener("click",async e=>{const approve=e.target.closest("[data-chat-approve]"),train=e.target.closest("[data-chat-not-task]"),dismiss=e.target.closest("[data-chat-dismiss]");if(approve){await api(`/api/chat/suggestions/${approve.dataset.chatApprove}/approve`,{method:"POST"});await load()}if(train){train.disabled=true;train.textContent="Training…";try{await api(`/api/chat/suggestions/${train.dataset.chatNotTask}/not-task`,{method:"POST",body:JSON.stringify({reason:"Marked Not a Task from Chat Review"})});await load()}catch(err){alert(err.message);train.disabled=false;train.textContent="Not a Task — Train"}}if(dismiss){await api(`/api/chat/suggestions/${dismiss.dataset.chatDismiss}/dismiss`,{method:"POST"});await load()}});
+el("chatSuggestionList").addEventListener("click",async e=>{
+  const make=e.target.closest("[data-chat-approve]"),invoice=e.target.closest("[data-chat-invoice]"),snooze=e.target.closest("[data-chat-snooze]"),chain=e.target.closest("[data-chat-dismiss-chain]"),dismiss=e.target.closest("[data-chat-dismiss]");
+  if(make){await api(`/api/chat/suggestions/${make.dataset.chatApprove}/approve`,{method:"POST"});state.tab="client";await load()}
+  if(invoice){await api(`/api/chat/suggestions/${invoice.dataset.chatInvoice}/invoice`,{method:"POST"});state.tab="invoice";await load()}
+  if(snooze){await api(`/api/chat/suggestions/${snooze.dataset.chatSnooze}/snooze`,{method:"POST"});await load()}
+  if(chain){const r=await api(`/api/chat/suggestions/${chain.dataset.chatDismissChain}/dismiss-chain`,{method:"POST"});await load();alert(`Dismissed ${r.dismissed||0} older chat item(s) from this chain.`)}
+  if(dismiss){await api(`/api/chat/suggestions/${dismiss.dataset.chatDismiss}/dismiss`,{method:"POST"});await load()}
+});
 // Sent follow-ups.
 el("sentList").addEventListener("click",async e=>{const create=e.target.closest("[data-sent-create-task]"),dismiss=e.target.closest("[data-sent-dismiss]"),open=e.target.closest("[data-open-linked-task]");if(create){await api(`/api/sent-followups/${create.dataset.sentCreateTask}/create-task`,{method:"POST"});await load();state.tab="client";updateViews()}if(dismiss){await api(`/api/sent-followups/${dismiss.dataset.sentDismiss}/dismiss`,{method:"POST"});await load()}if(open){state.tab="client";state.quickFilter="";el("search").value="";updateViews();setTimeout(()=>{const node=el(`task-${open.dataset.openLinkedTask}`);if(node)node.scrollIntoView({behavior:"smooth",block:"start"})},100)}});
 // Meeting recap review.
 el("meetingList").addEventListener("click",async e=>{const add=e.target.closest("[data-meeting-add]"),dismiss=e.target.closest("[data-meeting-dismiss]");if(add){const id=Number(add.dataset.meetingAdd),selected=[...document.querySelectorAll(`[data-meeting-task="${id}"]:checked`)].map(cb=>{const index=Number(cb.dataset.taskIndex),input=document.querySelector(`[data-meeting-assignee="${id}"][data-task-index="${index}"]`);return{index,assignee:input?.value.trim()||""}});if(!selected.length)return;const status=el(`meeting-status-${id}`);add.disabled=true;status.textContent="Adding selected meeting tasks…";try{const r=await api(`/api/meetings/reviews/${id}/add`,{method:"POST",body:JSON.stringify({tasks:selected})});status.textContent=`Added ${r.added} task(s).`;await load();state.tab="client";updateViews()}catch(err){status.textContent=err.message}finally{add.disabled=false}}if(dismiss){await api(`/api/meetings/reviews/${dismiss.dataset.meetingDismiss}/dismiss`,{method:"POST"});await load()}});
+
+
+el("invoiceSearch").addEventListener("input",renderInvoices);
+el("paidAccountsSearch").addEventListener("input",renderPaidAccounts);
+document.addEventListener("click",e=>{
+  const age=e.target.closest("[data-invoice-age]");
+  if(age){state.invoiceAge=age.dataset.invoiceAge;renderInvoices()}
+});
+el("clearInvoiceAge").addEventListener("click",()=>{state.invoiceAge="all";renderInvoices()});
+
+el("invoiceView").addEventListener("click",async e=>{
+  const edit=e.target.closest("[data-record-edit]"),paid=e.target.closest("[data-invoice-paid]"),del=e.target.closest("[data-invoice-delete]");
+  if(edit)await openRecordDetail(Number(edit.dataset.recordEdit));
+  if(paid){
+    const t=getTask(Number(paid.dataset.invoicePaid));if(!t)return;
+    if(confirm(`Mark invoice ${t.invoice_number||""} paid for the remaining ${money(t.amount,t.currency)}?`)){
+      await api(`/api/tasks/${t.id}/mark-paid`,{method:"POST",body:JSON.stringify({paid_amount:Number(t.amount||0)})});await load()
+    }
+  }
+  if(del&&confirm("Move this invoice to Deleted history?")){await api(`/api/invoices/${del.dataset.invoiceDelete}/delete`,{method:"POST"});await load()}
+});
+el("paidaccountsView").addEventListener("click",async e=>{
+  const edit=e.target.closest("[data-record-edit]"),rec=e.target.closest("[data-account-reconciled]"),del=e.target.closest("[data-account-delete]");
+  if(edit)await openRecordDetail(Number(edit.dataset.recordEdit));
+  if(rec&&confirm("Mark this payment reconciled?")){await api(`/api/paid-accounts/${rec.dataset.accountReconciled}/reconcile`,{method:"POST"});await load()}
+  if(del&&confirm("Move this reconciliation item to Deleted history?")){await api(`/api/paid-accounts/${del.dataset.accountDelete}/delete`,{method:"POST"});await load()}
+});
+el("recordDetailDialog").addEventListener("click",async e=>{
+  const save=e.target.closest("[data-record-save]"),partial=e.target.closest("[data-record-partial]"),note=e.target.closest("[data-record-note]"),research=e.target.closest("[data-record-research]"),reply=e.target.closest("[data-record-reply]"),resolution=e.target.closest("[data-record-resolution]");
+  if(note){
+    const id=Number(note.dataset.recordNote),body=el("recordNoteText").value.trim();
+    if(body){await api(`/api/tasks/${id}/notes`,{method:"POST",body:JSON.stringify({body})});await openRecordDetail(id)}
+  }
+  if(research){
+    const id=Number(research.dataset.recordResearch),question=el("recordResearchText").value.trim();if(!question)return;
+    const status=el("recordActionStatus");status.textContent="Searching email…";
+    try{const r=await api(`/api/tasks/${id}/email-research`,{method:"POST",body:JSON.stringify({question})});status.textContent=r.answer||"No answer returned."}catch(err){status.textContent=err.message}
+  }
+  if(reply){
+    const id=Number(reply.dataset.recordReply),t=await api(`/api/tasks/${id}`);
+    state.currentReply=t;el("replyTo").value=t.email_to||"";el("replySubject").value=t.email_subject||`Re: ${t.title}`;el("replyBody").value=t.suggested_reply||"";el("replyStatus").textContent="";updateCompose();el("replyDialog").showModal()
+  }
+  if(resolution){
+    const id=Number(resolution.dataset.recordResolution),status=el("recordActionStatus");status.textContent="Checking attached communication…";
+    try{const r=await api(`/api/tasks/${id}/check-resolution`,{method:"POST"});status.textContent=r.assessment?.likely_resolved?`Possible resolution: ${r.assessment.summary||r.assessment.reason||""}`:(r.assessment?.reason||"No clear resolution yet.")}catch(err){status.textContent=err.message}
+  }
+  if(save){
+    const id=Number(save.dataset.recordSave);
+    await api(`/api/tasks/${id}`,{method:"PATCH",body:JSON.stringify({
+      party:el("recordParty").value.trim(),
+      invoice_number:el("recordInvoice").value.trim(),
+      amount:Number(el("recordAmount").value||0),
+      due_date:el("recordDue").value,
+      detail:el("recordDetailText").value.trim()
+    })});
+    el("recordDetailDialog").close();await load()
+  }
+  if(partial){
+    const id=Number(partial.dataset.recordPartial);
+    const amount=Number(el("recordPartialAmount").value||0);
+    const r=await api(`/api/invoices/${id}/partial-payment`,{method:"POST",body:JSON.stringify({
+      amount,
+      reference:el("recordPartialReference").value.trim(),
+      note:el("recordPartialNote").value.trim()
+    })});
+    el("recordDetailDialog").close();await load();
+    if(r.fully_paid)alert("The partial payment cleared the remaining balance, so the invoice was moved to Paid history.")
+  }
+});
 
 // Full communications sync.
 el("settingsBtn").addEventListener("click",()=>el("settingsDialog").showModal());

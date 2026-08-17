@@ -23,7 +23,8 @@
   <nav class="tabs" aria-label="Dashboard sections">
     <button class="tab active" data-tab="client">Client Tasks <span id="tabClientCount">0</span></button>
     <button class="tab" data-tab="payment">Finances <span id="tabPaymentCount">0</span></button>
-    <button class="tab" data-tab="invoice">Invoice Register <span id="tabInvoiceCount">0</span></button>
+    <button class="tab" data-tab="paidaccounts">Paid Accounts <span id="tabPaidAccountsCount">0</span></button>
+    <button class="tab" data-tab="invoice">Invoices <span id="tabInvoiceCount">0</span></button>
     <button class="tab" data-tab="sent">Sent Follow-ups <span id="tabSentCount">0</span></button>
     <button class="tab" data-tab="gmail">Gmail Review <span id="tabGmailCount">0</span></button>
     <button class="tab" data-tab="chat">Chat Review <span id="tabChatCount">0</span></button>
@@ -36,6 +37,7 @@
       <button class="metric score-blue" data-quick="client-all"><span>Open Client Tasks</span><strong id="clientCount">0</strong><small>Click to show all</small></button>
       <button class="metric score-red" data-quick="client-urgent"><span>Urgent</span><strong id="clientUrgent">0</strong><small>Click to filter</small></button>
       <button class="metric score-orange" data-quick="client-due"><span>Due / Overdue</span><strong id="clientDue">0</strong><small>Click to filter</small></button>
+      <button class="metric score-green" data-quick="client-working"><span>Working</span><strong id="clientWorking">0</strong><small>Click to filter</small></button>
       <button class="metric score-purple" data-quick="client-waiting"><span>Waiting</span><strong id="clientWaiting">0</strong><small>Click to filter</small></button>
     </section>
   </section>
@@ -51,13 +53,54 @@
   </section>
 
   <section id="invoiceView" class="view hidden">
-    <section class="metrics">
-      <button class="metric score-purple" data-quick="invoice-all"><span>All Invoices</span><strong id="invoiceCount">0</strong><small>Open + paid</small></button>
-      <button class="metric score-blue" data-quick="invoice-unpaid"><span>Unpaid Invoices</span><strong id="invoiceTotal">0</strong><small>Click to show what needs paid</small></button>
-      <button class="metric score-red" data-quick="invoice-overdue"><span>Overdue Invoices</span><strong id="invoiceOverdue">0</strong><small>Unpaid and overdue</small></button>
-      <button class="metric score-green" data-quick="invoice-paid"><span>Paid Invoices</span><strong id="invoiceNoAmount">0</strong><small>Payment history</small></button>
+    <div class="table-toolbar">
+      <label class="table-search">Search Invoices
+        <input id="invoiceSearch" type="search" placeholder="Search vendor or invoice #">
+      </label>
+    </div>
+    <section class="metrics aging-metrics">
+      <button class="metric score-blue" data-invoice-age="current"><span>Current Due</span><strong id="invoiceAgeCurrent">$0</strong><small>Not yet 30 days overdue</small></button>
+      <button class="metric score-orange" data-invoice-age="30"><span>30 Days+</span><strong id="invoiceAge30">$0</strong><small>30–59 days overdue</small></button>
+      <button class="metric score-red" data-invoice-age="60"><span>60 Days+</span><strong id="invoiceAge60">$0</strong><small>60–89 days overdue</small></button>
+      <button class="metric score-purple" data-invoice-age="90"><span>90 Days+</span><strong id="invoiceAge90">$0</strong><small>90+ days overdue</small></button>
     </section>
-    <div class="callout"><strong>Complete Invoice Register:</strong> this includes every invoice detected or manually entered, including invoices still due and invoices already marked paid. Use the scorecards to jump directly to unpaid, overdue, or paid invoices.</div>
+    <div class="record-table-card">
+      <div class="table-title-row"><h2>Invoices I Owe</h2><button id="clearInvoiceAge" class="button secondary hidden">Clear Aging Filter</button></div>
+      <div class="table-scroll"><table class="record-table">
+        <thead><tr><th>Date</th><th>Vendor</th><th>Invoice # / Actions</th><th>Due Date</th><th class="money-col">Amount Due</th></tr></thead>
+        <tbody id="invoiceCurrentBody"></tbody>
+      </table></div>
+    </div>
+    <div class="record-table-card history-table">
+      <h2>Paid / Deleted Invoice History</h2>
+      <div class="table-scroll"><table class="record-table">
+        <thead><tr><th>Action Date</th><th>Status</th><th>Vendor</th><th>Invoice #</th><th>Due Date</th><th class="money-col">Original Amount</th><th class="money-col">Paid</th></tr></thead>
+        <tbody id="invoiceHistoryBody"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="paidaccountsView" class="view hidden">
+    <div class="table-toolbar">
+      <label class="table-search">Search Paid Accounts
+        <input id="paidAccountsSearch" type="search" placeholder="Search client or TSN invoice #">
+      </label>
+      <a class="button secondary" href="/api/paid-accounts/export.csv">Download CSV</a>
+    </div>
+    <div class="record-table-card">
+      <h2>Payments to Reconcile</h2>
+      <div class="table-scroll"><table class="record-table">
+        <thead><tr><th>Date</th><th>Client Name</th><th>Invoice # / Actions</th><th class="money-col">Amount</th></tr></thead>
+        <tbody id="paidAccountsCurrentBody"></tbody>
+      </table></div>
+    </div>
+    <div class="record-table-card history-table">
+      <h2>Reconciled / Deleted History</h2>
+      <div class="table-scroll"><table class="record-table">
+        <thead><tr><th>Action Date</th><th>Status</th><th>Original Date</th><th>Client Name</th><th>Invoice #</th><th class="money-col">Amount</th></tr></thead>
+        <tbody id="paidAccountsHistoryBody"></tbody>
+      </table></div>
+    </div>
   </section>
 
   <section id="sentView" class="view hidden">
@@ -252,6 +295,15 @@
     </div>
 
     <div class="row"><button class="button secondary" data-close-dialog="diagnosticsDialog">Close</button></div>
+  </div>
+</dialog>
+
+
+<dialog id="recordDetailDialog">
+  <div class="dialog-box wide-dialog">
+    <div class="dialog-head"><h2 id="recordDetailTitle">Details</h2><button class="icon-button" data-close-dialog="recordDetailDialog">×</button></div>
+    <div id="recordDetailBody"></div>
+    <div class="row"><button class="button secondary" data-close-dialog="recordDetailDialog">Dismiss</button></div>
   </div>
 </dialog>
 

@@ -201,3 +201,39 @@ UPGRADE_CHECKLIST.md
 ```
 
 No database or Render setting change is required.
+## Organization group update
+
+Replace:
+```text
+app.py
+static/app.js
+static/style.css
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+No destructive database migration is required.
+## Paid Accounts + Invoice tables + Chat workflow release
+
+Replace:
+```text
+app.py
+templates/index.html
+static/app.js
+static/style.css
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Do not delete `/var/data/tasks.db`.
+
+After deploy:
+1. Open **Paid Accounts** and confirm U Aspire Digital / TSN-30556 appears if it was not already found.
+2. Confirm reconcile-payment Gmail with TSN-##### bypasses Client Tasks/GPT.
+3. Open **Invoices** and test Current/30+/60+/90+ filters.
+4. Test Partial Payment and verify the remaining balance decreases without moving the invoice until fully paid.
+5. Test invoice Mark Paid/Delete history.
+6. Open **Chat Review** and verify newest topic/company groups first.
+7. Test Make Task, Send to Invoices, Snooze, Dismiss Rest of Chat Chain, and Dismiss.
+8. Confirm "You got an email from..." Chat messages no longer appear.
+9. Change a Client Task to Working/Waiting and confirm it leaves the default feed and appears under its top scorecard.

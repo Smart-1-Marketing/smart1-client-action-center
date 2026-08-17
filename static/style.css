@@ -190,3 +190,130 @@ dialog{border:none;border-radius:16px;padding:0;width:min(720px,calc(100% - 30px
   .task-status,
   .task-sort{flex:1 1 220px}
 }
+
+
+/* Organization groups — 2+ tasks from the same Gmail sender domain */
+.organization-group{
+  border:1px solid var(--border);
+  border-radius:16px;
+  background:var(--card2);
+  margin:14px 0;
+  overflow:hidden;
+}
+.organization-head{
+  width:100%;
+  border:0;
+  background:transparent;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:14px;
+  padding:14px 16px;
+  cursor:pointer;
+  text-align:left;
+  color:var(--text);
+}
+.organization-head:hover{background:rgba(127,127,127,.06)}
+.organization-title-wrap{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  min-width:0;
+}
+.organization-chevron{font-size:20px;width:18px;flex:0 0 18px}
+.organization-kicker{
+  font-size:10px;
+  letter-spacing:.08em;
+  font-weight:800;
+  color:var(--muted);
+}
+.organization-title{font-size:18px;font-weight:800}
+.organization-domain{font-size:12px;color:var(--muted);margin-top:2px}
+.organization-badges{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:7px;
+  flex-wrap:wrap;
+}
+.org-count,.org-mini{
+  border-radius:999px;
+  padding:5px 9px;
+  font-size:12px;
+  font-weight:700;
+  background:var(--gray-soft);
+}
+.org-mini.urgent{background:var(--red-soft);color:var(--red)}
+.org-mini.due{background:var(--orange-soft);color:var(--orange)}
+.org-mini.waiting{background:var(--purple-soft);color:var(--purple)}
+.organization-tasks{padding:0 12px 12px}
+.organization-tasks .task-card{margin-top:10px}
+@media(max-width:760px){
+  .organization-head{align-items:flex-start;flex-direction:column}
+  .organization-badges{justify-content:flex-start;padding-left:28px}
+}
+
+
+/* Paid Accounts + Invoices table workflows */
+.paid-account{background:var(--green-soft);color:var(--green)}
+.table-toolbar{
+  display:flex;
+  align-items:end;
+  justify-content:space-between;
+  gap:12px;
+  margin:10px 0 14px;
+}
+.table-search{flex:1;margin:0}
+.table-search input{width:100%}
+.record-table-card{
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:14px;
+  margin:14px 0;
+}
+.record-table-card h2{margin:0 0 10px;font-size:18px}
+.table-title-row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.table-scroll{overflow-x:auto}
+.record-table{width:100%;border-collapse:collapse;font-size:14px}
+.record-table th,.record-table td{padding:10px 9px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle}
+.record-table tbody tr:hover{background:rgba(127,127,127,.04)}
+.money-col{text-align:right!important;white-space:nowrap}
+.money-col small{display:block;color:var(--muted);font-size:11px}
+.invoice-action-cell{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:210px}
+.table-actions{display:inline-flex;gap:5px}
+.table-icon{
+  width:30px;height:30px;border-radius:8px;border:1px solid var(--border);
+  background:var(--card2);color:var(--text);font-weight:900;cursor:pointer
+}
+.table-icon.positive{background:var(--green-soft);color:var(--green)}
+.table-icon.danger{background:var(--red-soft);color:var(--red)}
+.history-state{font-size:11px;font-weight:800;border-radius:999px;padding:4px 8px;background:var(--gray-soft)}
+.history-state.paid,.history-state.reconciled{background:var(--green-soft);color:var(--green)}
+.history-state.deleted{background:var(--red-soft);color:var(--red)}
+.history-table{opacity:.94}
+.empty-cell{text-align:center!important;color:var(--muted);padding:22px!important}
+.aging-metrics{grid-template-columns:repeat(4,1fr)}
+.record-detail-summary{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:8px 0 14px
+}
+.record-detail-summary>div{border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--card2)}
+.record-detail-summary span{display:block;color:var(--muted);font-size:11px}
+.record-detail-summary strong{font-size:15px}
+.detail-section{border-top:1px solid var(--border);padding-top:13px;margin-top:13px}
+.detail-section h3{margin:0 0 8px}
+.chat-topic-group{
+  border:1px solid var(--border);border-radius:15px;background:var(--card2);padding:10px;margin:12px 0
+}
+.chat-topic-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 5px 10px}
+.chat-topic-head strong{font-size:17px}
+.chat-topic-head span{color:var(--muted);font-size:12px}
+.suggestion.snoozed{opacity:.7}
+@media(max-width:850px){
+  .aging-metrics{grid-template-columns:1fr 1fr}
+  .record-detail-summary{grid-template-columns:1fr 1fr}
+}
+
+#clientView .metrics{grid-template-columns:repeat(5,1fr)}
+@media(max-width:1100px){#clientView .metrics{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){#clientView .metrics{grid-template-columns:1fr 1fr}}

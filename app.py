@@ -16,7 +16,7 @@ from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -306,6 +306,17 @@ def init_db():
             UNIQUE(sender_domain, subject_pattern)
         );
 
+        CREATE TABLE IF NOT EXISTS invoice_payment_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL DEFAULT 'partial',
+            amount REAL NOT NULL DEFAULT 0,
+            reference TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS task_participants (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER NOT NULL,
@@ -435,6 +446,12 @@ def init_db():
             "payment_reference TEXT DEFAULT ''",
             "payment_note TEXT DEFAULT ''",
             "source_received_at TEXT DEFAULT ''",
+            "paid_account_state TEXT DEFAULT 'current'",
+            "paid_account_action_at TEXT DEFAULT ''",
+            "invoice_state TEXT DEFAULT 'current'",
+            "invoice_action_at TEXT DEFAULT ''",
+            "original_amount REAL NOT NULL DEFAULT 0",
+            "amount_paid REAL NOT NULL DEFAULT 0",
         ]:
             ensure_column(con, "tasks", definition)
 
@@ -471,6 +488,8 @@ def init_db():
             "payment_amount REAL NOT NULL DEFAULT 0",
             "currency TEXT NOT NULL DEFAULT 'USD'",
             "invoice_number TEXT DEFAULT ''",
+            "snoozed INTEGER NOT NULL DEFAULT 0",
+            "snoozed_at TEXT DEFAULT ''",
         ]:
             ensure_column(con, "chat_suggestions", definition)
 
@@ -495,6 +514,73 @@ def init_db():
             "source_url TEXT DEFAULT ''",
         ]:
             ensure_column(con, "task_resolution_reviews", definition)
+
+        con.execute(
+            """
+            UPDATE tasks SET original_amount=amount
+            WHERE category='payment' AND original_amount<=0 AND amount>0
+            """
+        )
+        con.execute(
+            """
+            UPDATE tasks
+            SET invoice_state=CASE
+                WHEN completed=1 AND COALESCE(paid_at,'')<>'' THEN 'paid'
+                ELSE 'current'
+            END
+            WHERE category='payment' AND COALESCE(invoice_state,'') IN ('','current')
+            """
+        )
+
+        existing_reconcile = con.execute(
+            """
+            SELECT id,title,detail,email_subject,invoice_number,completed
+            FROM tasks
+            WHERE lower(COALESCE(title,'')) LIKE '%reconcile payment%'
+               OR lower(COALESCE(detail,'')) LIKE '%reconcile payment%'
+               OR lower(COALESCE(email_subject,'')) LIKE '%reconcile payment%'
+            """
+        ).fetchall()
+        for r in existing_reconcile:
+            blob = " ".join([r["title"] or "",r["detail"] or "",r["email_subject"] or "",r["invoice_number"] or ""])
+            match = re.search(r"\bTSN-\d{5}\b", blob, re.I)
+            if match:
+                con.execute(
+                    """
+                    UPDATE tasks
+                    SET category='paid_account',invoice_number=?,invoice_sent=0,invoice_sent_at='',
+                        gpt_can_help=0,gpt_help_prompt='',gpt_help_reason='',
+                        paid_account_state=CASE WHEN completed=1 THEN 'reconciled' ELSE 'current' END,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (match.group(0).upper(),r["id"])
+                )
+
+        con.execute(
+            """
+            UPDATE chat_suggestions
+            SET state='dismissed',updated_at=CURRENT_TIMESTAMP
+            WHERE state='new'
+              AND lower(trim(COALESCE(message_text,''))) LIKE 'you got an email from%'
+            """
+        )
+
+        # Explicit item requested by the user.
+        if not con.execute(
+            "SELECT 1 FROM tasks WHERE category='paid_account' AND upper(invoice_number)='TSN-30556' LIMIT 1"
+        ).fetchone():
+            con.execute(
+                """
+                INSERT INTO tasks
+                (category,party,title,detail,priority,status,amount,currency,invoice_number,
+                 invoice_sent,gpt_can_help,source_kind,source_received_at,paid_account_state)
+                VALUES
+                ('paid_account','U Aspire Digital','Reconcile payment for Invoice TSN-30556',
+                 'Reconcile payment from U Aspire Digital for Invoice TSN-30556. Amount can be filled from the source email/details.',
+                 'normal','Open',0,'USD','TSN-30556',0,0,'manual',CURRENT_TIMESTAMP,'current')
+                """
+            )
 
         if con.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0:
             con.executemany("""
@@ -1448,6 +1534,75 @@ def fallback_analyze(email, watched=False):
     }
 
 
+
+RECONCILE_PAYMENT_RE = re.compile(r"\breconcile\s+payment\b", re.I)
+TSN_INVOICE_RE = re.compile(r"\bTSN-\d{5}\b", re.I)
+
+
+def reconcile_payment_details(email):
+    text = " ".join([
+        email.get("subject", "") or "",
+        email.get("snippet", "") or "",
+        (email.get("body", "") or "")[:8000],
+    ])
+    if not RECONCILE_PAYMENT_RE.search(text):
+        return None
+    inv = TSN_INVOICE_RE.search(text)
+    if not inv:
+        return None
+    amount = 0.0
+    money_matches = re.findall(r"\$\s*([\d,]+(?:\.\d{2})?)", text)
+    if money_matches:
+        try:
+            amount = float(money_matches[0].replace(",", ""))
+        except ValueError:
+            amount = 0.0
+    return {
+        "invoice_number": inv.group(0).upper(),
+        "amount": amount,
+        "client": (email.get("sender_name") or "").strip() or sender_domain(email.get("sender_email", "")) or "Client",
+    }
+
+
+def insert_paid_account_from_email(con, email, details):
+    existing = con.execute("SELECT id FROM tasks WHERE gmail_message_id=? LIMIT 1",(email["message_id"],)).fetchone()
+    if existing:
+        return existing["id"]
+    cur = con.execute(
+        """
+        INSERT INTO tasks
+        (category,party,title,detail,due_date,priority,status,email_url,gmail_message_id,gmail_thread_id,
+         email_to,email_subject,amount,currency,invoice_number,invoice_sent,suggested_reply,ai_confidence,
+         gpt_can_help,gpt_help_prompt,gpt_help_reason,recipient_count,source_kind,source_received_at,
+         paid_account_state)
+        VALUES
+        ('paid_account',?,?,?,'','normal','Open',?,?,?,?,?,?,?,?,0,'','',0,'','',?,'gmail',?,'current')
+        """,
+        (
+            details["client"],
+            f"Reconcile payment for {details['invoice_number']}",
+            email.get("snippet", "") or (email.get("body", "") or "")[:1200],
+            email.get("url", ""),
+            email["message_id"],
+            email.get("thread_id", ""),
+            email.get("sender_email", ""),
+            f"Re: {email.get('subject','')}" if email.get("subject") else "Re: Reconcile payment",
+            float(details.get("amount",0) or 0),
+            "USD",
+            details["invoice_number"],
+            int(email.get("recipient_count",0) or 0),
+            email["received"].isoformat(),
+        )
+    )
+    task_id=cur.lastrowid
+    add_task_participants(con,task_id,email.get("participants",[]),"source email")
+    con.execute(
+        "INSERT INTO notes(task_id,body) VALUES(?,?)",
+        (task_id,"Automatically classified as Paid Accounts because the email says Reconcile Payment and contains a TSN-##### invoice.")
+    )
+    return task_id
+
+
 def analyze_email(email, watched=False):
     if OPENAI_API_KEY:
         try:
@@ -1711,6 +1866,14 @@ def sync_gmail():
         if int(email.get("recipient_count", 0) or 0) >= 2 and email.get("thread_id"):
             email["thread_context"] = gmail_thread_context(service, email["thread_id"], limit=14, char_budget=16000)
         domain = sender_domain(email["sender_email"])
+
+        reconcile = reconcile_payment_details(email)
+        if reconcile:
+            with connect_db() as con:
+                insert_paid_account_from_email(con,email,reconcile)
+                record_processed(con,message_id,email["thread_id"],"paid_account_reconcile")
+            auto_added += 1
+            continue
 
         # Hard ignore rules run before task matching or OpenAI analysis.
         # This prevents explicitly trained automated sources such as xwf.google.com
@@ -2798,6 +2961,26 @@ MESSAGE
     return openai_json(prompt, CHAT_ANALYSIS_SCHEMA, "chat_action_analysis")
 
 
+
+def best_chat_organization(con,suggestion):
+    text=" ".join([suggestion["suggested_title"] or "",suggestion["suggested_summary"] or "",suggestion["message_text"] or ""]).lower()
+    parties=con.execute(
+        "SELECT party,COUNT(*) AS n FROM tasks WHERE category='client' AND COALESCE(party,'')<>'' GROUP BY party ORDER BY n DESC LIMIT 200"
+    ).fetchall()
+    best="";best_score=0
+    compact_text=re.sub(r"[^a-z0-9]","",text)
+    for row in parties:
+        party=(row["party"] or "").strip()
+        if len(party)<4:continue
+        low=party.lower();compact=re.sub(r"[^a-z0-9]","",low);score=0
+        if low in text:score=100+len(low)
+        elif len(compact)>=5 and compact in compact_text:score=80+len(compact)
+        else:
+            score=sum(8 for w in re.findall(r"[a-z0-9]+",low) if len(w)>=4 and w in text)
+        if score>best_score:best_score=score;best=party
+    return best if best_score>=8 else ""
+
+
 def chat_candidate_tasks(con, space_name):
     rows = con.execute(
         "SELECT * FROM tasks WHERE completed=0 ORDER BY updated_at DESC LIMIT 150"
@@ -2861,7 +3044,10 @@ def attach_chat_update(con, task_id, msg, space, match_method="chat thread", mak
     return True
 
 
-def insert_task_from_chat_suggestion(con, s):
+def insert_task_from_chat_suggestion(con, s, force_category=None):
+    category=force_category or s["suggested_category"]
+    matched_org=best_chat_organization(con,s) if category=="client" else ""
+    party=matched_org or s["space_display_name"] or s["sender_display_name"] or "Google Chat"
     cur = con.execute(
         """
         INSERT INTO tasks
@@ -2870,7 +3056,7 @@ def insert_task_from_chat_suggestion(con, s):
          chat_space_name,chat_thread_name,chat_message_name,chat_space_uri,source_received_at)
         VALUES (?,?,?,?,?,?,'Open',?,?,?,?,?,?,?,?,?,'chat',?,?,?,?,?)
         """,
-        (s["suggested_category"], s["space_display_name"] or s["sender_display_name"] or "Google Chat",
+        (category, party,
          s["suggested_title"] or "Google Chat task", s["suggested_summary"] or s["message_text"],
          s["suggested_due_date"], s["suggested_priority"], s["space_uri"], float(s["payment_amount"] or 0),
          s["currency"] or "USD", s["invoice_number"] or "", s["suggested_reply"] or "", s["confidence"] or "",
@@ -2906,6 +3092,10 @@ def sync_google_chat():
             name = msg.get("name", "")
             text = chat_message_text(msg)
             if not name or not text:
+                continue
+            if text.strip().lower().startswith("you got an email from"):
+                with connect_db() as con:
+                    chat_record_processed(con,name,space.get("name",""),"email_summary_notification")
                 continue
             checked += 1
             with connect_db() as con:
@@ -2994,6 +3184,8 @@ def create_or_update_gpt_help(task_id):
         task = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if not task:
         raise RuntimeError("Task not found.")
+    if task["category"] == "paid_account":
+        return {"can_help": False, "reason": "Paid Accounts reconciliation items never use GPT help.", "prompt": ""}
     prompt = f"""
 Decide whether GPT can materially help Todd complete this business task itself, rather than merely remind him.
 Examples: draft or rewrite content, analyze information, research a defined topic, write code, troubleshoot from supplied evidence,
@@ -3137,6 +3329,28 @@ def serialize_task(row, con):
     item = dict(row)
     if not item.get("source_received_at"):
         item["source_received_at"] = item.get("created_at", "")
+
+    sender_email_value = ""
+    if item.get("gmail_message_id"):
+        sender_row = con.execute(
+            """
+            SELECT sender_email
+            FROM gmail_suggestions
+            WHERE gmail_message_id=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (item.get("gmail_message_id"),)
+        ).fetchone()
+        if sender_row:
+            sender_email_value = sender_row["sender_email"] or ""
+
+    if not sender_email_value:
+        sender_email_value = item.get("email_to") or ""
+
+    item["sender_email"] = sender_email_value
+    item["sender_domain"] = normalize_domain(sender_domain(sender_email_value)) if sender_email_value else ""
+
     item["notes"] = [dict(n) for n in notes]
     item["research_logs"] = []
     for r in research:
@@ -3643,9 +3857,10 @@ def chat_suggestions():
     with connect_db() as con:
         rows = con.execute(
             """
-            SELECT * FROM chat_suggestions WHERE state=?
-            ORDER BY CASE WHEN suggested_due_date='' THEN 1 ELSE 0 END,
-                     suggested_due_date ASC, create_time DESC
+            SELECT * FROM chat_suggestions
+            WHERE state=?
+              AND lower(trim(COALESCE(message_text,''))) NOT LIKE 'you got an email from%'
+            ORDER BY snoozed ASC,create_time DESC
             """,
             (state,)
         ).fetchall()
@@ -3665,6 +3880,55 @@ def approve_chat_suggestion(suggestion_id):
             return jsonify({"ok": True, "already_exists": True, "task_id": existing["id"]})
         task_id = insert_task_from_chat_suggestion(con, srow)
         return jsonify({"ok": True, "task_id": task_id})
+
+
+
+@app.post("/api/chat/suggestions/<int:suggestion_id>/invoice")
+@login_required
+def chat_suggestion_to_invoice(suggestion_id):
+    with connect_db() as con:
+        srow=con.execute("SELECT * FROM chat_suggestions WHERE id=?",(suggestion_id,)).fetchone()
+        if not srow:return jsonify({"error":"Chat suggestion not found"}),404
+        existing=con.execute("SELECT id FROM tasks WHERE chat_message_name=? LIMIT 1",(srow["message_name"],)).fetchone()
+        if existing:return jsonify({"ok":True,"task_id":existing["id"],"already_exists":True})
+        editable=dict(srow);editable["suggested_category"]="payment"
+        task_id=insert_task_from_chat_suggestion(con,editable,force_category="payment")
+        con.execute(
+            """
+            UPDATE tasks SET invoice_sent=1,invoice_sent_at=CURRENT_TIMESTAMP,invoice_state='current',
+                original_amount=CASE WHEN original_amount<=0 THEN amount ELSE original_amount END
+            WHERE id=?
+            """,
+            (task_id,)
+        )
+        return jsonify({"ok":True,"task_id":task_id})
+
+
+@app.post("/api/chat/suggestions/<int:suggestion_id>/snooze")
+@login_required
+def snooze_chat_suggestion(suggestion_id):
+    with connect_db() as con:
+        con.execute("UPDATE chat_suggestions SET snoozed=1,snoozed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",(suggestion_id,))
+    return jsonify({"ok":True})
+
+
+@app.post("/api/chat/suggestions/<int:suggestion_id>/dismiss-chain")
+@login_required
+def dismiss_chat_chain(suggestion_id):
+    with connect_db() as con:
+        current=con.execute("SELECT * FROM chat_suggestions WHERE id=?",(suggestion_id,)).fetchone()
+        if not current:return jsonify({"error":"Chat suggestion not found"}),404
+        if current["thread_name"]:
+            cur=con.execute(
+                "UPDATE chat_suggestions SET state='dismissed',updated_at=CURRENT_TIMESTAMP WHERE state='new' AND id<>? AND thread_name=? AND COALESCE(create_time,'')<=COALESCE(?,'')",
+                (suggestion_id,current["thread_name"],current["create_time"])
+            )
+        else:
+            cur=con.execute(
+                "UPDATE chat_suggestions SET state='dismissed',updated_at=CURRENT_TIMESTAMP WHERE state='new' AND id<>? AND space_name=? AND COALESCE(create_time,'')<=COALESCE(?,'')",
+                (suggestion_id,current["space_name"],current["create_time"])
+            )
+        return jsonify({"ok":True,"dismissed":cur.rowcount})
 
 
 @app.post("/api/chat/suggestions/<int:suggestion_id>/dismiss")
@@ -3732,7 +3996,7 @@ def list_sent_followups():
             """
             SELECT * FROM sent_monitors
             WHERE state=?
-            ORDER BY CASE WHEN followup_due='' THEN 1 ELSE 0 END, followup_due ASC, sent_at DESC
+            ORDER BY sent_at DESC,id DESC
             """,
             (state,)
         ).fetchall()
@@ -4096,6 +4360,8 @@ def list_tasks():
     if category:
         where.append("category=?")
         params.append(category)
+    elif completed:
+        where.append("category NOT IN ('payment','paid_account')")
     if invoice_only:
         where.extend(["category='payment'", "invoice_sent=1"])
     with connect_db() as con:
@@ -4111,22 +4377,17 @@ def list_tasks():
 @app.get("/api/invoices")
 @login_required
 def invoice_register():
-    """Complete invoice register: open + paid invoice records."""
     with connect_db() as con:
         rows = con.execute(
             """
             SELECT * FROM tasks
             WHERE category='payment'
               AND (invoice_sent=1 OR COALESCE(invoice_number,'') <> '')
-            ORDER BY
-              completed ASC,
-              CASE WHEN due_date='' THEN 1 ELSE 0 END,
-              due_date ASC,
-              source_received_at DESC,
-              id DESC
+            ORDER BY CASE WHEN COALESCE(invoice_state,'current')='current' THEN 0 ELSE 1 END,
+                     source_received_at DESC,id DESC
             """
         ).fetchall()
-        return jsonify([serialize_task(r, con) for r in rows])
+        return jsonify([serialize_task(r,con) for r in rows])
 
 
 
@@ -4141,10 +4402,16 @@ def dashboard_counts():
             "payment": con.execute(
                 "SELECT COUNT(*) FROM tasks WHERE completed=0 AND category='payment'"
             ).fetchone()[0],
+            "paid_accounts": con.execute(
+                "SELECT COUNT(*) FROM tasks WHERE category='paid_account' AND paid_account_state='current'"
+            ).fetchone()[0],
             "invoice": con.execute(
                 """
                 SELECT COUNT(*) FROM tasks
-                WHERE category='payment' AND (invoice_sent=1 OR COALESCE(invoice_number,'')<>'')
+                WHERE category='payment'
+                  AND completed=0
+                  AND COALESCE(invoice_state,'current')='current'
+                  AND (invoice_sent=1 OR COALESCE(invoice_number,'')<>'')
                 """
             ).fetchone()[0],
             "sent": con.execute(
@@ -4163,7 +4430,7 @@ def dashboard_counts():
                 "SELECT COUNT(*) FROM meeting_reviews WHERE state='new'"
             ).fetchone()[0],
             "completed": con.execute(
-                "SELECT COUNT(*) FROM tasks WHERE completed=1"
+                "SELECT COUNT(*) FROM tasks WHERE completed=1 AND category NOT IN ('payment','paid_account')"
             ).fetchone()[0],
         })
 
@@ -4245,6 +4512,149 @@ def update_task(task_id):
         if not row:
             return jsonify({"error": "Task not found"}), 404
         return jsonify(serialize_task(row, con))
+
+
+
+@app.get("/api/tasks/<int:task_id>")
+@login_required
+def get_task_detail(task_id):
+    with connect_db() as con:
+        row=con.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        if not row:return jsonify({"error":"Task not found"}),404
+        item=serialize_task(row,con)
+        events=con.execute(
+            "SELECT id,event_type,amount,reference,note,created_at FROM invoice_payment_events WHERE task_id=? ORDER BY id DESC",
+            (task_id,)
+        ).fetchall()
+        item["invoice_payment_events"]=[dict(x) for x in events]
+        return jsonify(item)
+
+
+@app.post("/api/invoices/<int:task_id>/partial-payment")
+@login_required
+def invoice_partial_payment(task_id):
+    payload=request.get_json(force=True)
+    try: amount=float(payload.get("amount",0) or 0)
+    except (TypeError,ValueError): return jsonify({"error":"Enter a valid partial payment amount."}),400
+    if amount<=0:return jsonify({"error":"Partial payment must be greater than zero."}),400
+    stamp=datetime.now().astimezone().isoformat(timespec="seconds")
+    reference=(payload.get("reference") or "").strip()
+    note=(payload.get("note") or "").strip()
+    with connect_db() as con:
+        task=con.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        if not task or task["category"]!="payment":return jsonify({"error":"Invoice not found."}),404
+        if task["completed"] or task["invoice_state"] in {"paid","deleted"}:return jsonify({"error":"This invoice is no longer open."}),400
+        remaining=float(task["amount"] or 0)
+        if remaining<=0:return jsonify({"error":"This invoice has no remaining balance."}),400
+        if amount>remaining+0.005:return jsonify({"error":"Partial payment cannot exceed the remaining invoice balance."}),400
+        already=float(task["amount_paid"] or 0)
+        original=float(task["original_amount"] or 0) or (remaining+already)
+        new_paid=already+amount
+        new_remaining=max(0.0,remaining-amount)
+        fully_paid=new_remaining<0.005
+        con.execute(
+            "INSERT INTO invoice_payment_events(task_id,event_type,amount,reference,note,created_at) VALUES(?,?,?,?,?,?)",
+            (task_id,"full" if fully_paid else "partial",amount,reference,note,stamp)
+        )
+        if fully_paid:
+            con.execute(
+                """
+                UPDATE tasks SET original_amount=?,amount_paid=?,amount=0,completed=1,completed_at=?,
+                    status='Completed',paid_at=?,paid_amount=?,payment_reference=?,payment_note=?,
+                    invoice_state='paid',invoice_action_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?
+                """,
+                (original,new_paid,stamp,stamp,new_paid,reference,note,stamp,task_id)
+            )
+        else:
+            con.execute(
+                "UPDATE tasks SET original_amount=?,amount_paid=?,amount=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (original,new_paid,new_remaining,task_id)
+            )
+        con.execute(
+            "INSERT INTO notes(task_id,body) VALUES(?,?)",
+            (task_id,f"Partial payment recorded: {amount:.2f} {task['currency'] or 'USD'}. Remaining balance: {new_remaining:.2f}.")
+        )
+    return jsonify({"ok":True,"fully_paid":fully_paid,"remaining":new_remaining,"amount_paid":new_paid})
+
+
+@app.post("/api/invoices/<int:task_id>/delete")
+@login_required
+def soft_delete_invoice(task_id):
+    stamp=datetime.now().astimezone().isoformat(timespec="seconds")
+    with connect_db() as con:
+        task=con.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        if not task or task["category"]!="payment":return jsonify({"error":"Invoice not found."}),404
+        con.execute(
+            "UPDATE tasks SET completed=1,completed_at=?,status='Completed',invoice_state='deleted',invoice_action_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (stamp,stamp,task_id)
+        )
+        con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)",(task_id,"Invoice moved to Deleted history."))
+    return jsonify({"ok":True,"state":"deleted","action_at":stamp})
+
+
+@app.get("/api/paid-accounts")
+@login_required
+def paid_accounts():
+    with connect_db() as con:
+        rows=con.execute(
+            "SELECT * FROM tasks WHERE category='paid_account' ORDER BY CASE WHEN paid_account_state='current' THEN 0 ELSE 1 END,source_received_at DESC,id DESC"
+        ).fetchall()
+        return jsonify([serialize_task(r,con) for r in rows])
+
+
+@app.post("/api/paid-accounts/<int:task_id>/reconcile")
+@login_required
+def reconcile_paid_account(task_id):
+    stamp=datetime.now().astimezone().isoformat(timespec="seconds")
+    with connect_db() as con:
+        task=con.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        if not task or task["category"]!="paid_account":return jsonify({"error":"Paid Account item not found."}),404
+        con.execute(
+            """
+            UPDATE tasks SET paid_account_state='reconciled',paid_account_action_at=?,completed=1,
+                completed_at=?,status='Completed',gpt_can_help=0,gpt_help_prompt='',gpt_help_reason='',
+                updated_at=CURRENT_TIMESTAMP WHERE id=?
+            """,
+            (stamp,stamp,task_id)
+        )
+        con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)",(task_id,"Payment reconciliation completed."))
+    return jsonify({"ok":True,"state":"reconciled","action_at":stamp})
+
+
+@app.post("/api/paid-accounts/<int:task_id>/delete")
+@login_required
+def delete_paid_account(task_id):
+    stamp=datetime.now().astimezone().isoformat(timespec="seconds")
+    with connect_db() as con:
+        task=con.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        if not task or task["category"]!="paid_account":return jsonify({"error":"Paid Account item not found."}),404
+        con.execute(
+            """
+            UPDATE tasks SET paid_account_state='deleted',paid_account_action_at=?,completed=1,
+                completed_at=?,status='Completed',gpt_can_help=0,gpt_help_prompt='',gpt_help_reason='',
+                updated_at=CURRENT_TIMESTAMP WHERE id=?
+            """,
+            (stamp,stamp,task_id)
+        )
+        con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)",(task_id,"Paid Account item moved to Deleted history."))
+    return jsonify({"ok":True,"state":"deleted","action_at":stamp})
+
+
+@app.get("/api/paid-accounts/export.csv")
+@login_required
+def export_paid_accounts_csv():
+    with connect_db() as con:
+        rows=con.execute(
+            "SELECT source_received_at,party,invoice_number,amount FROM tasks WHERE category='paid_account' AND paid_account_state='current' ORDER BY source_received_at DESC,id DESC"
+        ).fetchall()
+    lines=["Date,Client Name,Invoice #,Amount"]
+    for r in rows:
+        date=(r["source_received_at"] or "").replace('"','""')
+        client=(r["party"] or "").replace('"','""')
+        invoice=(r["invoice_number"] or "").replace('"','""')
+        amount=f"{float(r['amount'] or 0):.2f}"
+        lines.append(f'"{date}","{client}","{invoice}",{amount}')
+    return Response("\n".join(lines)+"\n",mimetype="text/csv",headers={"Content-Disposition":"attachment; filename=paid-accounts-current.csv"})
 
 
 @app.post("/api/tasks/<int:task_id>/notes")
@@ -4366,35 +4776,34 @@ def send_chat_reply(task_id):
 @app.post("/api/tasks/<int:task_id>/mark-paid")
 @login_required
 def mark_task_paid(task_id):
-    payload = request.get_json(silent=True) or {}
-    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    payload=request.get_json(silent=True) or {}
+    stamp=datetime.now().astimezone().isoformat(timespec="seconds")
     with connect_db() as con:
-        task = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if not task:
-            return jsonify({"error": "Task not found"}), 404
-        if task["category"] != "payment":
-            return jsonify({"error": "Only payment items can be marked paid."}), 400
-
-        paid_amount = float(payload.get("paid_amount", task["amount"] or 0) or 0)
-        reference = (payload.get("payment_reference") or "").strip()
-        note = (payload.get("payment_note") or "").strip()
-
+        task=con.execute("SELECT * FROM tasks WHERE id=?",(task_id,)).fetchone()
+        if not task:return jsonify({"error":"Task not found"}),404
+        if task["category"]!="payment":return jsonify({"error":"Only invoice/payment items can be marked paid."}),400
+        remaining=float(task["amount"] or 0)
+        already=float(task["amount_paid"] or 0)
+        paid_now=float(payload.get("paid_amount",remaining) or remaining)
+        if paid_now<=0:paid_now=remaining
+        reference=(payload.get("payment_reference") or "").strip()
+        note=(payload.get("payment_note") or "").strip()
+        original=float(task["original_amount"] or 0) or (remaining+already)
+        total=already+paid_now
         con.execute(
             """
-            UPDATE tasks
-            SET completed=1,completed_at=?,status='Completed',paid_at=?,paid_amount=?,
-                payment_reference=?,payment_note=?,updated_at=CURRENT_TIMESTAMP
-            WHERE id=?
+            UPDATE tasks SET completed=1,completed_at=?,status='Completed',paid_at=?,paid_amount=?,
+                payment_reference=?,payment_note=?,original_amount=?,amount_paid=?,amount=0,
+                invoice_state='paid',invoice_action_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?
             """,
-            (stamp, stamp, paid_amount, reference, note, task_id)
+            (stamp,stamp,total,reference,note,original,total,stamp,task_id)
         )
-        summary = f"Marked paid: {paid_amount:.2f} {task['currency'] or 'USD'}"
-        if reference:
-            summary += f"; reference {reference}"
-        if note:
-            summary += f"; {note}"
-        con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)", (task_id, summary))
-    return jsonify({"ok": True, "paid_at": stamp})
+        con.execute(
+            "INSERT INTO invoice_payment_events(task_id,event_type,amount,reference,note,created_at) VALUES(?,'full',?,?,?,?)",
+            (task_id,paid_now,reference,note,stamp)
+        )
+        con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)",(task_id,f"Marked invoice paid. Payment: {paid_now:.2f} {task['currency'] or 'USD'}"))
+    return jsonify({"ok":True,"paid_at":stamp})
 
 
 

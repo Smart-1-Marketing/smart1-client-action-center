@@ -566,3 +566,118 @@ Sort options:
 - Priority
 
 Company sorting uses the task's company/client/vendor (`party`) field.
+## Organization grouping by sender domain
+
+Client Tasks now group automatically when two or more tasks come from the same Gmail sender domain.
+
+Example:
+
+```text
+ORGANIZATION
+Pillar Media
+pillarmedia.com
+4 tasks · 2 urgent · 1 waiting
+```
+
+Behavior:
+- 2+ tasks with the same sender domain become one collapsible Organization group
+- a domain with only one task stays as a normal task card
+- tasks without a sender domain stay standalone
+- the sender domain is always visible on the organization header
+- the organization name uses the repeated company/client designation when available; otherwise it derives a readable name from the domain
+- urgent, due, and waiting counts are summarized on the group header
+- your existing task sorting still applies before grouping, including Date Received and Company sorting
+- Finances, Invoice Register, and Completed are not grouped by sender domain
+## Paid Accounts — incoming money reconciliation
+
+Any Gmail message containing both:
+
+```text
+Reconcile Payment
+TSN-#####
+```
+
+is intercepted before normal task/OpenAI classification and placed in **Paid Accounts**.
+
+Paid Accounts current table:
+```text
+Date | Client Name | Invoice # | Amount | See/Edit | Reconciled | Delete
+```
+
+- never shows GPT Help
+- never uses Invoice Sent
+- Reconciled and Delete are soft actions; records move to history rather than disappearing
+- history shows the action date and whether the item was RECONCILED or DELETED
+- current table downloads as CSV
+- existing reconcile-payment tasks are migrated automatically
+- `U Aspire Digital / TSN-30556` is seeded if it is not already present
+
+## Invoices — money Smart 1 owes
+
+The former **Invoice Register** tab is now **Invoices** and uses compact tables.
+
+Current invoice table:
+```text
+Date | Vendor | Invoice # / actions | Due Date | Amount Due
+```
+
+Actions:
+- Mark Paid
+- See/Edit
+- Delete
+
+History table records Paid/Deleted with an action timestamp.
+
+Aging cards under invoice search:
+- Current Due
+- 30 Days+
+- 60 Days+
+- 90 Days+
+
+Each aging card shows the total remaining amount in that bucket and filters the table when clicked.
+
+### Partial payments
+
+See/Edit includes **Partial Payment**. A partial payment:
+- records date, amount, reference and note
+- reduces the remaining `amount`
+- increases `amount_paid`
+- does not move the invoice to Paid until remaining balance reaches zero
+
+## Google Chat review workflow
+
+Chat Review is grouped by topic/company-style space label, with groups ordered by newest activity.
+
+Every Chat review item now has:
+- Make Task
+- Send to Invoices
+- Snooze
+- Dismiss Rest of Chat Chain
+- Dismiss
+- Open Chat
+
+`Make Task` checks existing client organization names against the Chat text and reuses a matching organization when possible.
+
+Snooze keeps the item in Chat Review but moves it toward the bottom.
+
+`Dismiss Rest of Chat Chain` dismisses older pending items in the same Chat thread; if no thread resource exists, it uses older items in the same space.
+
+Messages beginning with:
+
+```text
+You got an email from
+```
+
+are permanently ignored because they are email-summary notifications, not Chat tasks.
+
+## Sent Follow-ups
+
+Sent Follow-ups are always sorted by `sent_at` descending — newest sent email first.
+
+## Client Tasks status inbox
+
+The default Client Tasks feed excludes:
+- Working
+- Waiting
+
+Those statuses have dedicated clickable scorecards at the top. Changing a task to Working or Waiting removes it from the default feed and puts it into the matching categorized feed.
