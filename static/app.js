@@ -132,6 +132,9 @@ function domainDisplayName(domain){
 }
 
 function organizationNameForDomain(tasks,domain){
+  const backendName=tasks.map(t=>String(t.organization_name||"").trim()).find(Boolean);
+  if(backendName)return backendName;
+
   const counts={};
   for(const t of tasks){
     const name=String(t.party||"").trim();
@@ -139,9 +142,7 @@ function organizationNameForDomain(tasks,domain){
     counts[name]=(counts[name]||0)+1;
   }
   const ranked=Object.entries(counts).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
-  // Use the most common organization/client designation already attached to the tasks.
-  // If tasks have different sender names, the domain remains the stable group designation.
-  if(ranked.length && ranked[0][1]>1)return ranked[0][0];
+  if(ranked.length)return ranked[0][0];
   return domainDisplayName(domain);
 }
 
@@ -161,10 +162,6 @@ function groupClientTasksByDomain(rows){
 
   const groups=[];
   for(const [domain,tasks] of domains.entries()){
-    if(tasks.length<2){
-      standalone.push({type:"task",task:tasks[0]});
-      continue;
-    }
     groups.push({
       type:"group",
       domain,
@@ -173,7 +170,8 @@ function groupClientTasksByDomain(rows){
     });
   }
 
-  // Keep organization groups together; group heading makes domain explicit.
+  // Every sender domain is an Organization, even if it currently has only one task.
+  // Multiple tasks from the same domain always stay together.
   groups.sort((a,b)=>a.organization.localeCompare(b.organization)||a.domain.localeCompare(b.domain));
   return [...groups,...standalone];
 }
@@ -195,7 +193,7 @@ function organizationGroupHtml(group){
         </div>
       </div>
       <div class="organization-badges">
-        <span class="org-count">${group.tasks.length} tasks</span>
+        <span class="org-count">${group.tasks.length} task${group.tasks.length===1?"":"s"}</span>
         ${urgent?`<span class="org-mini urgent">${urgent} urgent</span>`:""}
         ${due?`<span class="org-mini due">${due} due</span>`:""}
         ${waiting?`<span class="org-mini waiting">${waiting} waiting</span>`:""}
@@ -709,10 +707,18 @@ el("invoiceView").addEventListener("click",async e=>{
   if(paid){
     const t=getTask(Number(paid.dataset.invoicePaid));if(!t)return;
     if(confirm(`Mark invoice ${t.invoice_number||""} paid for the remaining ${money(t.amount,t.currency)}?`)){
-      await api(`/api/tasks/${t.id}/mark-paid`,{method:"POST",body:JSON.stringify({paid_amount:Number(t.amount||0)})});await load()
+      await api(`/api/tasks/${t.id}/mark-paid`,{method:"POST",body:JSON.stringify({paid_amount:Number(t.amount||0)})});
+      const inv=String(t.invoice_number||"").trim().toLowerCase();
+      state.payment=state.payment.filter(x=>x.id!==t.id&&(!inv||String(x.invoice_number||"").trim().toLowerCase()!==inv));
+      await load()
     }
   }
-  if(del&&confirm("Move this invoice to Deleted history?")){await api(`/api/invoices/${del.dataset.invoiceDelete}/delete`,{method:"POST"});await load()}
+  if(del&&confirm("Move this invoice to Deleted history?")){
+    const id=Number(del.dataset.invoiceDelete),t=getTask(id),inv=String(t?.invoice_number||"").trim().toLowerCase();
+    await api(`/api/invoices/${id}/delete`,{method:"POST"});
+    state.payment=state.payment.filter(x=>x.id!==id&&(!inv||String(x.invoice_number||"").trim().toLowerCase()!==inv));
+    await load()
+  }
 });
 el("paidaccountsView").addEventListener("click",async e=>{
   const edit=e.target.closest("[data-record-edit]"),rec=e.target.closest("[data-account-reconciled]"),del=e.target.closest("[data-account-delete]");

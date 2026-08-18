@@ -260,3 +260,40 @@ After deploy:
 2. Open **Diagnostics** and verify Build = `2026.08.18-invoices-memory-1`.
 3. Open **Invoices** and confirm the aging dashboard + current/history tables.
 4. Watch Render memory through at least one automatic or manual sync.
+## Domain Organizations (2026.08.18-domain-orgs-1)
+
+Replace:
+```text
+app.py
+static/app.js
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+No database migration is required.
+
+After deploy:
+1. Open Diagnostics and verify Build = `2026.08.18-domain-orgs-1`.
+2. Confirm a `schmidthaus.com` task appears as **Organization: Schmidt**.
+3. Confirm even a sender domain with only one task has an Organization header.
+4. Confirm multiple tasks from the same sender domain appear inside one group.
+## Invoice / Finance sync (2026.08.18-invoice-finance-sync-1)
+
+Replace:
+```text
+app.py
+static/app.js
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+No destructive database migration is required.
+
+After deployment:
+1. Verify Diagnostics Build = `2026.08.18-invoice-finance-sync-1`.
+2. Open Invoices.
+3. Mark one invoice Paid.
+4. Open Finance — the same invoice must be gone.
+5. Delete another invoice.
+6. Open Finance — that invoice must also be gone.
+7. Confirm both records remain in the appropriate Invoice history table.

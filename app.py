@@ -26,7 +26,7 @@ from openai import OpenAI
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026.08.18-invoices-memory-1"
+APP_BUILD_VERSION = "2026.08.18-invoice-finance-sync-1"
 # Honor Render's X-Forwarded-Proto/X-Forwarded-Host so externally generated
 # OAuth URLs use the public HTTPS address.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
@@ -3313,6 +3313,30 @@ if AUTO_GMAIL_SYNC_MINUTES > 0 and os.environ.get("DISABLE_BACKGROUND_GMAIL_SYNC
 
 # ---------------- Serialization ----------------
 
+
+ORGANIZATION_DOMAIN_ALIASES = {
+    "schmidthaus.com": "Schmidt",
+}
+
+
+def organization_name_from_domain(domain, fallback_party=""):
+    """Return the stable organization designation for a sender domain."""
+    domain = normalize_domain(domain or "")
+    if not domain:
+        return (fallback_party or "").strip()
+
+    if domain in ORGANIZATION_DOMAIN_ALIASES:
+        return ORGANIZATION_DOMAIN_ALIASES[domain]
+
+    party = (fallback_party or "").strip()
+    if party and "@" not in party and len(party) >= 2:
+        return party
+
+    root = domain.split(".")[0]
+    root = re.sub(r"[-_]+", " ", root).strip()
+    return " ".join(word.capitalize() for word in root.split()) or domain
+
+
 def serialize_task_summary(row, con):
     item = dict(row)
     if not item.get("source_received_at"):
@@ -3334,6 +3358,12 @@ def serialize_task_summary(row, con):
 
     item["sender_email"] = sender_email_value
     item["sender_domain"] = normalize_domain(sender_domain(sender_email_value)) if sender_email_value else ""
+    item["organization_name"] = organization_name_from_domain(
+        item["sender_domain"], item.get("party") or ""
+    )
+    item["organization_name"] = organization_name_from_domain(
+        item["sender_domain"], item.get("party") or ""
+    )
 
     # Keep the main feed useful without returning every historical message.
     notes = con.execute(
@@ -4638,6 +4668,9 @@ def invoice_partial_payment(task_id):
                 """,
                 (original,new_paid,stamp,stamp,new_paid,reference,note,stamp,task_id)
             )
+            close_related_finance_tasks(
+                con, task, "paid", stamp, exclude_task_id=task_id
+            )
         else:
             con.execute(
                 "UPDATE tasks SET original_amount=?,amount_paid=?,amount=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -4661,8 +4694,14 @@ def soft_delete_invoice(task_id):
             "UPDATE tasks SET completed=1,completed_at=?,status='Completed',invoice_state='deleted',invoice_action_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (stamp,stamp,task_id)
         )
-        con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)",(task_id,"Invoice moved to Deleted history."))
-    return jsonify({"ok":True,"state":"deleted","action_at":stamp})
+        related_closed = close_related_finance_tasks(
+            con, task, "deleted", stamp, exclude_task_id=task_id
+        )
+        note = "Invoice moved to Deleted history."
+        if related_closed:
+            note += f" Automatically removed {related_closed} related Finance task(s)."
+        con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)",(task_id,note))
+    return jsonify({"ok":True,"state":"deleted","action_at":stamp,"finance_tasks_closed":related_closed})
 
 
 @app.get("/api/paid-accounts")
@@ -4846,6 +4885,57 @@ def send_chat_reply(task_id):
     })
 
 
+
+def close_related_finance_tasks(con, source_task, action_state, stamp, exclude_task_id=None):
+    """
+    Keep Invoices and Finance synchronized.
+
+    When an invoice is Paid or Deleted, any other active payment task tied to
+    the same invoice is closed too so it cannot remain in the Finance queue.
+    """
+    clauses = []
+    params = []
+
+    invoice_number = (source_task["invoice_number"] or "").strip()
+    gmail_message_id = (source_task["gmail_message_id"] or "").strip()
+    gmail_thread_id = (source_task["gmail_thread_id"] or "").strip()
+
+    if invoice_number:
+        clauses.append("upper(trim(COALESCE(invoice_number,'')))=upper(?)")
+        params.append(invoice_number)
+    if gmail_message_id:
+        clauses.append("COALESCE(gmail_message_id,'')=?")
+        params.append(gmail_message_id)
+    if gmail_thread_id:
+        clauses.append("COALESCE(gmail_thread_id,'')=?")
+        params.append(gmail_thread_id)
+
+    if not clauses:
+        return 0
+
+    where = " OR ".join(f"({c})" for c in clauses)
+    sql = f"""
+        UPDATE tasks
+        SET completed=1,
+            completed_at=CASE WHEN COALESCE(completed_at,'')='' THEN ? ELSE completed_at END,
+            status='Completed',
+            invoice_state=?,
+            invoice_action_at=?,
+            updated_at=CURRENT_TIMESTAMP
+        WHERE category='payment'
+          AND completed=0
+          AND ({where})
+    """
+    full_params = [stamp, action_state, stamp] + params
+
+    if exclude_task_id is not None:
+        sql += " AND id<>?"
+        full_params.append(exclude_task_id)
+
+    cur = con.execute(sql, full_params)
+    return cur.rowcount
+
+
 @app.post("/api/tasks/<int:task_id>/mark-paid")
 @login_required
 def mark_task_paid(task_id):
@@ -4871,12 +4961,20 @@ def mark_task_paid(task_id):
             """,
             (stamp,stamp,total,reference,note,original,total,stamp,task_id)
         )
+        related_closed = close_related_finance_tasks(
+            con, task, "paid", stamp, exclude_task_id=task_id
+        )
         con.execute(
             "INSERT INTO invoice_payment_events(task_id,event_type,amount,reference,note,created_at) VALUES(?,'full',?,?,?,?)",
             (task_id,paid_now,reference,note,stamp)
         )
         con.execute("INSERT INTO notes(task_id,body) VALUES(?,?)",(task_id,f"Marked invoice paid. Payment: {paid_now:.2f} {task['currency'] or 'USD'}"))
-    return jsonify({"ok":True,"paid_at":stamp})
+        if related_closed:
+            con.execute(
+                "INSERT INTO notes(task_id,body) VALUES(?,?)",
+                (task_id, f"Automatically removed {related_closed} related Finance task(s) for this invoice.")
+            )
+    return jsonify({"ok":True,"paid_at":stamp,"finance_tasks_closed":related_closed})
 
 
 

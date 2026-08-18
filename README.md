@@ -713,3 +713,46 @@ The 30-day search window is unchanged. Memory is reduced by:
 
 This preserves the 30-day catch-up behavior over successive sync passes instead of trying
 to analyze a large backlog in one memory spike.
+## Domain-defined Organizations — build 2026.08.18-domain-orgs-1
+
+Sender domain is now the authoritative organization key.
+
+Rules:
+- every task with a sender domain belongs to an Organization, even if only one task exists
+- every task from the same sender domain is grouped into the same Organization
+- organization groups remain collapsible
+- tasks without a sender domain stay standalone
+- the backend returns a stable `organization_name` for every domain
+- explicit brand aliases can override the literal domain name
+
+Current explicit alias:
+```text
+schmidthaus.com -> Schmidt
+```
+
+Therefore any sender at:
+```text
+anything@schmidthaus.com
+```
+is displayed under:
+```text
+Organization: Schmidt
+```
+## Invoice ↔ Finance synchronization — build 2026.08.18-invoice-finance-sync-1
+
+Invoices is now authoritative for payment completion/removal.
+
+When an invoice is:
+- **Mark Paid**
+- **Deleted**
+- fully cleared by a **Partial Payment**
+
+the same invoice is removed from the active **Finance** queue automatically.
+
+Synchronization rules:
+- the selected invoice task is completed immediately
+- duplicate active Finance tasks with the same `invoice_number` are completed too
+- if invoice number is unavailable, Gmail message/thread linkage is used
+- the Invoice record remains in Paid/Deleted history
+- the Finance queue shows only still-actionable payment items
+- an audit note records when related Finance tasks were automatically closed
