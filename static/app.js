@@ -506,6 +506,7 @@ async function loadSystem(){
   el("aiSimpleState").textContent=s.openai_configured?"Configured":"Not configured";
   el("aiSimpleState").className=`pill ${s.openai_configured?"ok":"neutral"}`;
   el("aiSimpleDetail").textContent=s.openai_last_error?`Last error: ${s.openai_last_error}`:"";
+  el("buildVersion").textContent=s.app_build_version||"Unknown";
 
   const showConnect=!s.gmail_connected||s.google_scope_upgrade_needed;
   el("connectGoogle").classList.toggle("hidden",!showConnect||!s.google_configured);

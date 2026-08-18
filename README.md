@@ -681,3 +681,35 @@ The default Client Tasks feed excludes:
 - Waiting
 
 Those statuses have dedicated clickable scorecards at the top. Changing a task to Working or Waiting removes it from the default feed and puts it into the matching categorized feed.
+## Invoice dashboard + 512 MB memory hotfix — build 2026.08.18-invoices-memory-1
+
+This build adds an explicit build identifier under **Diagnostics → Build** and cache-busts
+`style.css` and `app.js` using the build version. This prevents an older browser-cached
+JavaScript bundle from masking a newly deployed invoice dashboard.
+
+### Invoice dashboard verification
+
+After deployment:
+- Diagnostics must show `2026.08.18-invoices-memory-1`
+- the tab must be named **Invoices**
+- opening it should request `/api/invoices`
+- the page shows Search Invoices, Current Due, 30 Days+, 60 Days+, 90 Days+,
+  Invoices I Owe, and Paid / Deleted Invoice History
+
+### Low-memory mode
+
+The 30-day search window is unchanged. Memory is reduced by:
+- processing at most 12 new Gmail items through AI per pass
+- reducing Sent scan cap to 75
+- reducing Chat to 50 spaces / 30 messages per space
+- reducing large AI context budgets
+- delaying automatic background sync 180 seconds after worker boot
+- using `malloc_trim(0)` after communication stages on Linux
+- using `MALLOC_ARENA_MAX=2`
+- recycling Gunicorn after about 75 requests
+- returning lean dashboard task summaries instead of embedding every email/chat/research
+  history in every list response
+- loading full history only when `/api/tasks/<id>` is opened for detail
+
+This preserves the 30-day catch-up behavior over successive sync passes instead of trying
+to analyze a large backlog in one memory spike.

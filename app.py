@@ -26,6 +26,7 @@ from openai import OpenAI
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
+APP_BUILD_VERSION = "2026.08.18-invoices-memory-1"
 # Honor Render's X-Forwarded-Proto/X-Forwarded-Host so externally generated
 # OAuth URLs use the public HTTPS address.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
@@ -3206,6 +3207,19 @@ Detail: {task['detail']}
     return result
 
 
+def release_process_memory():
+    """Best-effort RSS reduction for the small Render instance."""
+    gc.collect()
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        trim = getattr(libc, "malloc_trim", None)
+        if trim:
+            trim(0)
+    except Exception:
+        pass
+
+
 def sync_all_communications():
     # Avoid overlapping manual, browser, and background syncs.
     if not SYNC_LOCK.acquire(blocking=False):
@@ -3218,7 +3232,7 @@ def sync_all_communications():
             set_setting("gmail_last_error", str(exc))
             result["gmail"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         try:
             result["meetings"] = sync_meeting_recaps()
@@ -3226,7 +3240,7 @@ def sync_all_communications():
             set_setting("meeting_last_error", str(exc))
             result["meetings"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         try:
             result["sent"] = sync_sent_mail()
@@ -3234,7 +3248,7 @@ def sync_all_communications():
             set_setting("sent_last_error", str(exc))
             result["sent"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         try:
             result["chat"] = sync_google_chat()
@@ -3242,7 +3256,7 @@ def sync_all_communications():
             set_setting("chat_last_error", str(exc))
             result["chat"] = {"error": str(exc)}
         finally:
-            gc.collect()
+            release_process_memory()
 
         try:
             consistent_database_backup()
@@ -3275,13 +3289,13 @@ def manual_sync_worker():
         with MANUAL_SYNC_STATE_LOCK:
             MANUAL_SYNC_STATE["running"] = False
             MANUAL_SYNC_STATE["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        gc.collect()
+        release_process_memory()
 
 
 # ---------------- Background sync ----------------
 
 def background_sync_loop():
-    time.sleep(30)
+    time.sleep(max(30, BACKGROUND_SYNC_START_DELAY_SECONDS))
     while True:
         try:
             if get_setting("gmail_credentials", ""):
@@ -3289,7 +3303,7 @@ def background_sync_loop():
         except Exception as exc:
             set_setting("gmail_last_error", str(exc))
         finally:
-            gc.collect()
+            release_process_memory()
         time.sleep(max(60, AUTO_GMAIL_SYNC_MINUTES * 60))
 
 
@@ -3298,6 +3312,64 @@ if AUTO_GMAIL_SYNC_MINUTES > 0 and os.environ.get("DISABLE_BACKGROUND_GMAIL_SYNC
 
 
 # ---------------- Serialization ----------------
+
+def serialize_task_summary(row, con):
+    item = dict(row)
+    if not item.get("source_received_at"):
+        item["source_received_at"] = item.get("created_at", "")
+
+    sender_email_value = ""
+    if item.get("gmail_message_id"):
+        sender_row = con.execute(
+            """
+            SELECT sender_email FROM gmail_suggestions
+            WHERE gmail_message_id=? ORDER BY id DESC LIMIT 1
+            """,
+            (item.get("gmail_message_id"),)
+        ).fetchone()
+        if sender_row:
+            sender_email_value = sender_row["sender_email"] or ""
+    if not sender_email_value:
+        sender_email_value = item.get("email_to") or ""
+
+    item["sender_email"] = sender_email_value
+    item["sender_domain"] = normalize_domain(sender_domain(sender_email_value)) if sender_email_value else ""
+
+    # Keep the main feed useful without returning every historical message.
+    notes = con.execute(
+        "SELECT id,body,created_at FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 2",
+        (row["id"],)
+    ).fetchall()
+    participants = con.execute(
+        "SELECT email,display_name,source FROM task_participants WHERE task_id=? ORDER BY id LIMIT 12",
+        (row["id"],)
+    ).fetchall()
+    resolutions = con.execute(
+        """
+        SELECT id,source_type,source_id,summary,confidence,sources_json,state,source_url,created_at,decided_at
+        FROM task_resolution_reviews
+        WHERE task_id=? AND state='new'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (row["id"],)
+    ).fetchall()
+
+    item["notes"] = [dict(n) for n in notes]
+    item["participants"] = [dict(p) for p in participants]
+    item["research_logs"] = []
+    item["email_updates"] = []
+    item["chat_updates"] = []
+    item["resolution_reviews"] = []
+    for r in resolutions:
+        d = dict(r)
+        try:
+            d["sources"] = json.loads(d.pop("sources_json") or "[]")
+        except Exception:
+            d["sources"] = []
+            d.pop("sources_json", None)
+        item["resolution_reviews"].append(d)
+    return item
+
 
 def serialize_task(row, con):
     notes = con.execute(
@@ -3412,7 +3484,7 @@ def logout():
 def index():
     if DB_STARTUP_ERROR:
         return redirect(url_for("database_recovery_page"))
-    return render_template("index.html")
+    return render_template("index.html", app_build_version=APP_BUILD_VERSION)
 
 
 @app.get("/database-recovery")
@@ -3676,6 +3748,7 @@ def system_status():
         "auto_add_invoices": get_setting("auto_add_invoices", "1") == "1",
         "not_task_training_count": len(not_task_examples("gmail", 500)) + len(not_task_examples("chat", 500)),
         "xwf_google_ignored": ignored_source("gmail", "notice@xwf.google.com", "xwf.google.com"),
+        "app_build_version": APP_BUILD_VERSION,
     })
 
 
@@ -4387,7 +4460,7 @@ def invoice_register():
                      source_received_at DESC,id DESC
             """
         ).fetchall()
-        return jsonify([serialize_task(r,con) for r in rows])
+        return jsonify([serialize_task_summary(r,con) for r in rows])
 
 
 
@@ -4599,7 +4672,7 @@ def paid_accounts():
         rows=con.execute(
             "SELECT * FROM tasks WHERE category='paid_account' ORDER BY CASE WHEN paid_account_state='current' THEN 0 ELSE 1 END,source_received_at DESC,id DESC"
         ).fetchall()
-        return jsonify([serialize_task(r,con) for r in rows])
+        return jsonify([serialize_task_summary(r,con) for r in rows])
 
 
 @app.post("/api/paid-accounts/<int:task_id>/reconcile")

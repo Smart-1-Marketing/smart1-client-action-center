@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Smart 1 Client Action Center</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=app_build_version) }}">
 </head>
 <body>
 <main class="page">
@@ -65,7 +65,7 @@
       <button class="metric score-purple" data-invoice-age="90"><span>90 Days+</span><strong id="invoiceAge90">$0</strong><small>90+ days overdue</small></button>
     </section>
     <div class="record-table-card">
-      <div class="table-title-row"><h2>Invoices I Owe</h2><button id="clearInvoiceAge" class="button secondary hidden">Clear Aging Filter</button></div>
+      <div class="table-title-row"><div><h2>Invoices I Owe</h2><div class="helper">Current unpaid vendor invoices. Click the aging boxes above to filter.</div></div><button id="clearInvoiceAge" class="button secondary hidden">Clear Aging Filter</button></div>
       <div class="table-scroll"><table class="record-table">
         <thead><tr><th>Date</th><th>Vendor</th><th>Invoice # / Actions</th><th>Due Date</th><th class="money-col">Amount Due</th></tr></thead>
         <tbody id="invoiceCurrentBody"></tbody>
@@ -283,6 +283,11 @@
         <span id="aiSimpleState" class="pill neutral">Checking…</span>
         <span id="aiSimpleDetail" class="helper"></span>
       </div>
+      <div class="diagnostic-system-row">
+        <strong>Build</strong>
+        <span class="pill neutral">Version</span>
+        <span id="buildVersion" class="helper">Checking…</span>
+      </div>
     </div>
 
     <div class="row diagnostic-actions">
@@ -307,6 +312,6 @@
   </div>
 </dialog>
 
-<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js', v=app_build_version) }}"></script>
 </body>
 </html>

@@ -237,3 +237,26 @@ After deploy:
 7. Test Make Task, Send to Invoices, Snooze, Dismiss Rest of Chat Chain, and Dismiss.
 8. Confirm "You got an email from..." Chat messages no longer appear.
 9. Change a Client Task to Working/Waiting and confirm it leaves the default feed and appears under its top scorecard.
+## Invoice dashboard + memory hotfix (2026.08.18-invoices-memory-1)
+
+Replace:
+```text
+app.py
+templates/index.html
+static/app.js
+static/style.css
+render.yaml
+README.md
+UPGRADE_CHECKLIST.md
+```
+
+Do not delete `/var/data/tasks.db`.
+
+Important: replace **all** files above together. The previous Render log showed an older
+HTML/JavaScript combination still being served.
+
+After deploy:
+1. Hard-refresh the page once.
+2. Open **Diagnostics** and verify Build = `2026.08.18-invoices-memory-1`.
+3. Open **Invoices** and confirm the aging dashboard + current/history tables.
+4. Watch Render memory through at least one automatic or manual sync.
